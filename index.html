@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Rimefall — Milestone 1</title>
+  <link rel="stylesheet" href="./style.css" />
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="app"></div>
+
+  <div id="hud">
+    <div class="title">RIMEFALL</div>
+    <div class="row"><span class="k">Tick</span><span class="v" id="hud-tick">0</span></div>
+    <div class="row"><span class="k">Tile</span><span class="v" id="hud-tile">(7, 7)</span></div>
+    <div class="row"><span class="k">Input</span><span class="v" id="hud-input">keyboard</span></div>
+  </div>
+
+  <div id="hint">
+    <b>WASD</b> move · <b>Space</b> attack · <b>E</b> eat · <b>1/2/3</b> gear · <b>Esc</b> pause<br />
+    <span>Gamepad: left stick move · A attack · X eat · D-pad swap · Start pause</span>
+  </div>
+
+  <div id="toast"></div>
+  <div id="pause-overlay"><div class="box">PAUSED</div></div>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>

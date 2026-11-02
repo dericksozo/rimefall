@@ -1,0 +1,1 @@
+{"error":{"message":"Failed to deserialize the JSON body into the target type: reasoning_effort: unknown variant `bogus`, expected one of `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `ultra`, `max` at line 1 column 141 (request_id: 55879007-ff64-45a4-b2b9-5f88dd52aa8a)","type":"invalid_request_error","param":null,"code":"invalid_request_error"}}

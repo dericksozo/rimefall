@@ -1,0 +1,11 @@
+{
+ "model": "deepseek-flash",
+ "messages": [
+  {
+   "role": "user",
+   "content": "Reply with just OK.\n"
+  }
+ ],
+ "max_tokens": 50,
+ "reasoning_effort": "bogus"
+}

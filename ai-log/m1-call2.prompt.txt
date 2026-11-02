@@ -1,0 +1,61 @@
+# Task: Milestone 1 of Rimefall
+
+## Game design context (whole game; build ONLY milestone 1 now)
+# Rimefall — Design Doc
+
+A ~10-minute browser 3D roguelike in frozen ruins, inspired by Old School RuneScape's PvM combat. Pure combat: no story, no skilling, no PvP, no bank.
+
+## Run structure
+- 5 rooms, then a Frost Giant boss room.
+- Between rooms: pick 1 of 3 rewards (weapon tier upgrade, armor piece, food, or a perk such as faster attacks).
+- Room 1: ice wolves (melee, weak to ranged). Room 2: frost mages (magic, weak to melee). Room 3: ice archers (ranged, weak to magic). Rooms 4–5: mixed, with elite variants.
+- Boss: Frost Giant. Phases; each phase resists the player's current style, forcing swaps. Attacks: stomps (telegraphed tile AoE) and falling icicles.
+
+## Core rules
+- OSRS-style game tick of 0.6 s (600 ms), fixed, decoupled from 60 fps rendering.
+- Tile grid. Player moves directly with WASD / left stick, one tile per tick. Diagonals allowed, but not through blocked corners. Rendered meshes interpolate smoothly between tiles across a tick.
+- Combat triangle: melee / ranged / magic. Three gear loadouts swapped via 1/2/3 or D-pad; a swap applies on the next tick.
+- Weapon attack speeds in ticks: sword 4, bow 3, staff 5. Attacks target the nearest enemy the player is facing.
+- No prayers. Defense = dodging telegraphed tile attacks (tiles glow 1–2 ticks before impact) + eating food (costs a tick).
+
+## Controls
+| Action | Keyboard | Gamepad (standard mapping) |
+|---|---|---|
+| Move | WASD | Left stick |
+| Attack / interact | Space | A (button 0) |
+| Eat | E | X (button 2) |
+| Swap gear melee/ranged/magic | 1 / 2 / 3 | D-pad (left/up/right or similar) |
+| Pause | Esc | Start (button 9) |
+
+## Look
+Chunky low-poly, soft lighting, light fog, snow. Angled OSRS-like camera following the player. Placeholder primitive shapes first; later milestones swap in Tripo-generated low-poly GLB models via a per-entity mesh factory (rendering of each entity type is isolated behind a factory function). Animation is procedural (bobbing, lunges, squash/stretch), no rigging.
+
+## Tech
+Plain HTML + ES modules, Three.js from a CDN importmap, no build step. Modules: main.js, tick.js, input.js, world.js, render.js, entities.js (more later).
+
+## Milestones
+1. Grid, ticks, movement, controller input, placeholder shapes.
+2. Combat with one enemy type.
+3. Style triangle, gear swaps, all three enemies.
+4. Rooms and loot picks between them.
+5. Frost Giant boss.
+6. Tripo models + polish.
+
+## Process
+All game code is written by DeepSeek-V4.1-Flash (reasoning_effort=max) via API; the director writes specs, tests in headless Chromium, and sends fix requests. Usage logged in ai-log/usage.jsonl.
+
+## Milestone 1 scope (build exactly this)
+Tech: plain HTML + ES modules, no build step, runs from any static server. Load Three.js via an importmap in index.html: "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js" and "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/". Files: index.html, style.css, src/main.js, src/tick.js, src/input.js, src/world.js, src/render.js, src/entities.js. Keep modules small and focused so later milestones edit pieces.
+
+1. World (world.js): a 15x15 tile room. Tile coords integers (x,z) 0..14. Room boundary is impassable (walls/edge). Place ~6 placeholder ruin pillars (1 tile each; maybe one 2-tile broken wall) that block movement; keep the player's spawn tile (7,7) and its neighbours clear. Export isWalkable(x,z) and the list of blockers. Deterministic layout.
+2. Tick loop (tick.js): fixed 600 ms tick, driven by accumulating real time in the render loop (or setInterval) but decoupled from 60fps rendering; expose tick count and a 0..1 alpha (progress through current tick) for interpolation. Callbacks subscribe to ticks. Pause support (Esc / Start toggles pause; paused = no ticks, show "PAUSED" overlay).
+3. Input (input.js): unify keyboard and the standard Gamepad API. Keyboard WASD (also arrow keys). Gamepad: poll navigator.getGamepads() every frame; left stick axes 0/1 with radial deadzone 0.3, also D-pad buttons 12-15 for movement is NOT wanted (D-pad is reserved for gear swaps later) — just stick. Map stick to one of 8 directions (snap by angle, 45° sectors). Buttons: A=0 attack, X=2 eat, D-pad 14/12/15 = swap gear 1/2/3, Start=9 pause; edge-detect presses and queue them as actions (attack/eat/swap1/2/3/pause) consumed at the next tick (pause applies immediately). Keyboard: Space attack, E eat, 1/2/3 swap, Esc pause. Buffered movement: at tick time, the direction currently held (latest input device to produce input wins) decides the move. Track "current input device": "keyboard" or "gamepad: <id>" — whichever was used most recently. Listen to gamepadconnected/gamepaddisconnected and also detect gamepads that appear via polling (some browsers only report after a button press).
+4. Movement rules: one tile per tick in the held direction (8 directions). Diagonal moves are allowed only if the target tile AND both orthogonally adjacent tiles are walkable (no corner cutting). If a diagonal is blocked, do NOT slide; just don't move. Player keeps a facing direction (last attempted direction) — it will be used for targeting later.
+5. Rendering (render.js): Three.js WebGLRenderer with antialias, shadows on (soft PCF), sRGB output. OSRS-like angled camera: perspective, looking down at ~45-55° pitch from a south-east-ish yaw, distance ~14 units, smoothly following the player's interpolated position. Snowy/icy floor: each tile a slightly bevelled/low box with subtle per-tile colour variation (pale blue-white), thin darker grid lines visible between tiles. Room edge: low icy stone walls around the perimeter. Soft hemisphere light + a directional "sun" with shadows, light blue-white fog. Falling snow particles (Points) for atmosphere. Handle window resize. Use flat shading / low-poly for the chunky look.
+6. Entities (entities.js): a per-entity mesh factory: createEntityMesh(kind) returning a THREE.Group, with kinds "player" and "pillar" (and "wall"). Player placeholder: chunky low-poly — box/capsule body (blue tunic), a head, maybe a simple helmet; it rotates to face its facing direction. Pillars: chunky icy-stone octagonal/broken column with a bit of snow on top. Rendering interpolates the player mesh from previous tile to current tile using tick alpha (smooth glide over the tick), plus a small procedural step bob while moving. Later milestones will replace the factory internals with GLB models, so all entity visuals must come only from this factory.
+7. HUD (DOM overlay, style.css): small top-left panel showing "Tick: N", "Tile: (x,z)", "Input: keyboard|gamepad: <id>". A toast/indicator "🎮 Controller connected: <id>" when a gamepad connects (visible ~3s), and "Controller disconnected". A short controls hint bottom-left. Chunky pixel-ish RuneScape-like styling (dark translucent panel, yellow/orange text) is welcome.
+8. Test hook (required): expose window.__rimefall = { get tick(), get player() -> {x, z, facing}, get inputDevice(), get paused(), isWalkable(x,z), blockers } so the automated test can read state. Also log "[rimefall] ready" to console once the first frame renders.
+
+Quality bar: no console errors, no external assets besides Three.js CDN, smooth 60fps rendering, crisp readable code with brief comments. Do not implement combat, enemies, or gear yet.
+
+IMPORTANT (output budget): your previous attempt spent its entire token budget drafting code inside its reasoning and produced no files. The spec above is complete; do NOT write or draft full code in your thinking. Think only about architecture and tricky details (tick/alpha interpolation, gamepad polling, corner rule) in brief notes, then write each file ONCE in the final answer in the required === FILE === format. Keep the total code compact (roughly 600-900 lines across all files).

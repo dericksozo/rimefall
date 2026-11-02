@@ -1,0 +1,926 @@
+=== FILE: index.html ===
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Rimefall — Milestone 1</title>
+  <link rel="stylesheet" href="./style.css" />
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="app"></div>
+
+  <div id="hud">
+    <div class="title">RIMEFALL</div>
+    <div class="row"><span class="k">Tick</span><span class="v" id="hud-tick">0</span></div>
+    <div class="row"><span class="k">Tile</span><span class="v" id="hud-tile">(7, 7)</span></div>
+    <div class="row"><span class="k">Input</span><span class="v" id="hud-input">keyboard</span></div>
+  </div>
+
+  <div id="hint">
+    <b>WASD</b> move · <b>Space</b> attack · <b>E</b> eat · <b>1/2/3</b> gear · <b>Esc</b> pause<br />
+    <span>Gamepad: left stick move · A attack · X eat · D-pad swap · Start pause</span>
+  </div>
+
+  <div id="toast"></div>
+  <div id="pause-overlay"><div class="box">PAUSED</div></div>
+
+  <script type="module" src="./src/main.js"></script>
+</body>
+</html>
+=== END FILE ===
+=== FILE: style.css ===
+/* Rimefall HUD — chunky, dark, RuneScape-ish. */
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #0b1620;
+  color: #ffd257;
+  font-family: ui-monospace, "Courier New", "Consolas", monospace;
+  -webkit-user-select: none;
+  user-select: none;
+  touch-action: none;
+}
+
+#app { position: fixed; inset: 0; }
+#app canvas { display: block; }
+
+#hud {
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  min-width: 218px;
+  padding: 10px 12px 9px;
+  background: rgba(8, 16, 24, 0.78);
+  border: 2px solid #7a5c1e;
+  border-radius: 4px;
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.55), inset 0 0 14px rgba(0, 0, 0, 0.65);
+  font-size: 13px;
+  line-height: 1.45;
+  letter-spacing: 0.4px;
+  pointer-events: none;
+  z-index: 5;
+}
+
+#hud .title {
+  color: #ffb347;
+  font-weight: bold;
+  letter-spacing: 3px;
+  margin-bottom: 5px;
+  text-shadow: 1px 1px 0 #000;
+}
+
+#hud .row { display: flex; justify-content: space-between; gap: 16px; }
+#hud .k { color: #9fb6c9; }
+#hud .v { color: #ffe08a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px; }
+
+#hint {
+  position: fixed;
+  left: 12px;
+  bottom: 12px;
+  max-width: 640px;
+  padding: 8px 12px;
+  background: rgba(8, 16, 24, 0.66);
+  border: 2px solid #4d4020;
+  border-radius: 4px;
+  color: #cfe0ee;
+  font-size: 12px;
+  line-height: 1.55;
+  pointer-events: none;
+  z-index: 5;
+}
+#hint b { color: #ffd257; }
+#hint span { color: #8fa6b8; }
+
+#toast {
+  position: fixed;
+  top: 14px;
+  left: 50%;
+  transform: translate(-50%, -10px);
+  padding: 8px 16px;
+  max-width: 72vw;
+  background: rgba(8, 16, 24, 0.92);
+  border: 2px solid #7a5c1e;
+  border-radius: 4px;
+  color: #ffe08a;
+  font-size: 13px;
+  text-align: center;
+  opacity: 0;
+  transition: opacity 0.22s ease, transform 0.22s ease;
+  pointer-events: none;
+  z-index: 8;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+}
+#toast.visible { opacity: 1; transform: translate(-50%, 0); }
+
+#pause-overlay {
+  position: fixed;
+  inset: 0;
+  display: none;
+  place-items: center;
+  background: rgba(4, 10, 16, 0.55);
+  backdrop-filter: blur(2px);
+  z-index: 10;
+  pointer-events: none;
+}
+#pause-overlay.visible { display: grid; }
+#pause-overlay .box {
+  padding: 18px 44px;
+  font-size: 40px;
+  letter-spacing: 10px;
+  color: #ffd257;
+  background: rgba(8, 14, 20, 0.88);
+  border: 3px double #a8792a;
+  border-radius: 4px;
+  text-shadow: 3px 3px 0 #000, 0 0 26px rgba(255, 200, 80, 0.35);
+}
+=== END FILE ===
+=== FILE: src/world.js ===
+// Static, deterministic room layout for Rimefall (15x15 tiles).
+// Tile coords are integers 0..14; world position of a tile is (x, 0, z).
+
+export const ROOM_SIZE = 15;
+export const MIN = 0;
+export const MAX = ROOM_SIZE - 1; // 14
+export const SPAWN = { x: 7, z: 7 };
+
+// Six broken ruin pillars, one tile each.
+export const pillars = [
+  { x: 3, z: 3 },
+  { x: 11, z: 3 },
+  { x: 3, z: 11 },
+  { x: 11, z: 11 },
+  { x: 5, z: 7 },
+  { x: 9, z: 4 },
+];
+
+// A two-tile collapsed wall section.
+export const brokenWall = [
+  { x: 9, z: 9 },
+  { x: 10, z: 9 },
+];
+
+// Every impassable interior tile, with its visual kind (used by the renderer).
+export const blockers = [
+  ...pillars.map((p) => ({ x: p.x, z: p.z, kind: 'pillar' })),
+  ...brokenWall.map((p) => ({ x: p.x, z: p.z, kind: 'wall' })),
+];
+
+const blockedTiles = new Set(blockers.map((b) => `${b.x},${b.z}`));
+
+// Perimeter ring (x/z 0 and 14) is wall; interior props block too.
+export function isWalkable(x, z) {
+  if (!Number.isInteger(x) || !Number.isInteger(z)) return false;
+  if (x < MIN + 1 || x > MAX - 1 || z < MIN + 1 || z > MAX - 1) return false;
+  return !blockedTiles.has(`${x},${z}`);
+}
+=== END FILE ===
+=== FILE: src/tick.js ===
+// Fixed game tick clock, decoupled from rendering.
+// alpha is the 0..1 progress through the current tick (for interpolation).
+
+export const TICK_MS = 600;
+
+export class Ticker {
+  constructor(tickMs = TICK_MS) {
+    this.tickMs = tickMs;
+    this.tick = 0;
+    this.acc = 0;
+    this.alpha = 0;
+    this.paused = false;
+    this.lastTime = -1;
+    this.callbacks = [];
+  }
+
+  subscribe(fn) {
+    this.callbacks.push(fn);
+    return () => {
+      const i = this.callbacks.indexOf(fn);
+      if (i >= 0) this.callbacks.splice(i, 1);
+    };
+  }
+
+  setPaused(value) {
+    const v = !!value;
+    if (this.paused === v) return;
+    this.paused = v;
+    // Resync the clock on resume so we never consume a giant backlog.
+    if (!v) this.lastTime = -1;
+  }
+
+  // Called once per rendered frame with a DOMHighResTimeStamp.
+  update(now) {
+    if (this.lastTime < 0) {
+      this.lastTime = now;
+      return;
+    }
+    if (this.paused) return;
+
+    let dt = now - this.lastTime;
+    this.lastTime = now;
+    // Clamp to avoid a spiral of death after tab switches / long stalls.
+    if (dt < 0) dt = 0;
+    if (dt > this.tickMs * 5) dt = this.tickMs * 5;
+
+    this.acc += dt;
+    let guard = 0;
+    while (this.acc >= this.tickMs && guard < 6) {
+      this.acc -= this.tickMs;
+      this.tick++;
+      guard++;
+      for (const cb of this.callbacks) cb(this.tick);
+    }
+    if (this.acc >= this.tickMs) this.acc = this.tickMs - 0.0001; // safety
+    this.alpha = Math.min(1, Math.max(0, this.acc / this.tickMs));
+  }
+}
+=== END FILE ===
+=== FILE: src/input.js ===
+// Unified keyboard + standard-gamepad input.
+// Movement is read at tick time; button presses are queueued as actions
+// and consumed on the next tick (pause applies immediately).
+
+const KEY_DIR = {
+  KeyW: [0, -1], ArrowUp: [0, -1],
+  KeyS: [0, 1], ArrowDown: [0, 1],
+  KeyA: [-1, 0], ArrowLeft: [-1, 0],
+  KeyD: [1, 0], ArrowRight: [1, 0],
+};
+
+const KEY_ACTION = {
+  Space: 'attack',
+  KeyE: 'eat',
+  Digit1: 'swap1', Digit2: 'swap2', Digit3: 'swap3',
+  Numpad1: 'swap1', Numpad2: 'swap2', Numpad3: 'swap3',
+};
+
+// 8 sectors, clockwise from "up" (-z).
+const PAD_DIRS = [
+  [0, -1], [1, -1], [1, 0], [1, 1],
+  [0, 1], [-1, 1], [-1, 0], [-1, -1],
+];
+
+// Gamepad face/D-pad buttons (spec mapping for later milestones).
+const PAD_ACTION = { 0: 'attack', 2: 'eat', 14: 'swap1', 12: 'swap2', 15: 'swap3' };
+const PAD_PAUSE_BUTTON = 9;
+const DEADZONE = 0.3;
+
+export class Input {
+  constructor(hooks = {}) {
+    this.onPause = hooks.onPause || (() => {});
+    this.onToast = hooks.onToast || (() => {});
+
+    this.device = 'keyboard';
+    this.keys = new Set();
+    this.actions = [];
+    this.padDir = null;
+    this.padButtonState = new Map(); // pad index -> previous button booleans
+    this.connectedIds = new Set();
+
+    this._bindKeyboard();
+
+    // Gamepads may appear via event or only after polling; poll on both.
+    const poll = () => this.pollGamepads();
+    window.addEventListener('gamepadconnected', poll);
+    window.addEventListener('gamepaddisconnected', poll);
+  }
+
+  _bindKeyboard() {
+    window.addEventListener('keydown', (e) => {
+      if (e.code === 'Escape') {
+        e.preventDefault();
+        if (!e.repeat) {
+          this.device = 'keyboard';
+          this.onPause();
+        }
+        return;
+      }
+      if (KEY_DIR[e.code]) {
+        e.preventDefault();
+        this.device = 'keyboard';
+        this.keys.add(e.code);
+        return;
+      }
+      const action = KEY_ACTION[e.code];
+      if (action) {
+        e.preventDefault();
+        this.device = 'keyboard';
+        if (!e.repeat) this.actions.push(action);
+      }
+    });
+
+    window.addEventListener('keyup', (e) => {
+      if (KEY_DIR[e.code]) this.keys.delete(e.code);
+    });
+
+    // Avoid "stuck" keys when the window loses focus.
+    window.addEventListener('blur', () => this.keys.clear());
+  }
+
+  keyboardDir() {
+    let x = 0;
+    let z = 0;
+    for (const code of this.keys) {
+      const d = KEY_DIR[code];
+      if (!d) continue;
+      x += d[0];
+      z += d[1];
+    }
+    x = Math.sign(x);
+    z = Math.sign(z);
+    return x || z ? { x, z } : null;
+  }
+
+  // Latest device to produce input wins; fall back to the other device if idle.
+  getDirection() {
+    const kb = this.keyboardDir();
+    const pad = this.padDir;
+    if (this.device.startsWith('gamepad')) return pad || kb;
+    return kb || pad;
+  }
+
+  consumeActions() {
+    const queued = this.actions;
+    this.actions = [];
+    return queued;
+  }
+
+  pollGamepads() {
+    if (!navigator.getGamepads) return;
+    const pads = navigator.getGamepads();
+    const seen = new Set();
+    let dir = null;
+
+    for (let i = 0; i < pads.length; i++) {
+      const gp = pads[i];
+      if (!gp || !gp.connected) {
+        this.padButtonState.delete(i);
+        continue;
+      }
+      seen.add(gp.id);
+      if (!this.connectedIds.has(gp.id)) {
+        this.connectedIds.add(gp.id);
+        this.onToast(`🎮 Controller connected: ${gp.id}`);
+      }
+
+      // Left stick: radial deadzone, snap to 45-degree sectors.
+      const ax = gp.axes[0] || 0;
+      const ay = gp.axes[1] || 0;
+      if (!dir && Math.hypot(ax, ay) >= DEADZONE) {
+        const angle = Math.atan2(ax, -ay); // 0 = up, clockwise
+        const sector = ((Math.round(angle / (Math.PI / 4)) % 8) + 8) % 8;
+        dir = { x: PAD_DIRS[sector][0], z: PAD_DIRS[sector][1] };
+        this.device = `gamepad: ${gp.id}`;
+      }
+
+      // Buttons: edge-detect presses.
+      let prev = this.padButtonState.get(i);
+      if (!prev || prev.length !== gp.buttons.length) {
+        prev = new Array(gp.buttons.length).fill(false);
+        this.padButtonState.set(i, prev);
+      }
+      for (const key of Object.keys(PAD_ACTION)) {
+        const idx = Number(key);
+        const pressed = !!(gp.buttons[idx] && gp.buttons[idx].pressed);
+        if (pressed && !prev[idx]) {
+          this.device = `gamepad: ${gp.id}`;
+          this.actions.push(PAD_ACTION[idx]);
+        }
+        prev[idx] = pressed;
+      }
+      const pausePressed = !!(gp.buttons[PAD_PAUSE_BUTTON] && gp.buttons[PAD_PAUSE_BUTTON].pressed);
+      if (pausePressed && !prev[PAD_PAUSE_BUTTON]) {
+        this.device = `gamepad: ${gp.id}`;
+        this.onPause();
+      }
+      prev[PAD_PAUSE_BUTTON] = pausePressed;
+    }
+
+    // Disconnects (detected by id so index shuffles don't false-positive).
+    for (const id of Array.from(this.connectedIds)) {
+      if (!seen.has(id)) {
+        this.connectedIds.delete(id);
+        this.onToast('Controller disconnected');
+        if (this.device === `gamepad: ${id}`) this.device = 'keyboard';
+      }
+    }
+
+    this.padDir = dir;
+  }
+}
+=== END FILE ===
+=== FILE: src/entities.js ===
+// All entity visuals come from createEntityMesh(kind).
+// Later milestones replace the internals with GLB models; callers stay unchanged.
+
+import * as THREE from 'three';
+
+function material(color, opts = {}) {
+  return new THREE.MeshStandardMaterial({
+    color,
+    flatShading: true,
+    roughness: 0.88,
+    metalness: 0.04,
+    ...opts,
+  });
+}
+
+function box(w, h, d, color, x = 0, y = 0, z = 0) {
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), material(color));
+  mesh.position.set(x, y, z);
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
+function cyl(rTop, rBottom, h, color, segments = 8) {
+  const mesh = new THREE.Mesh(new THREE.CylinderGeometry(rTop, rBottom, h, segments), material(color));
+  mesh.castShadow = true;
+  mesh.receiveShadow = true;
+  return mesh;
+}
+
+function buildPlayer(group) {
+  const tunic = 0x3f74d6;
+  const trim = 0x24406f;
+  const skin = 0xe9c39b;
+  const steel = 0xcfe4f5;
+  const dark = 0x24313f;
+
+  group.add(box(0.58, 0.64, 0.4, tunic, 0, 0.66, 0));   // torso
+  group.add(box(0.6, 0.12, 0.42, trim, 0, 0.4, 0));     // belt
+  group.add(box(0.2, 0.34, 0.22, dark, -0.14, 0.17, 0)); // left leg
+  group.add(box(0.2, 0.34, 0.22, dark, 0.14, 0.17, 0));  // right leg
+  group.add(box(0.16, 0.44, 0.18, tunic, -0.37, 0.68, 0)); // left arm
+  group.add(box(0.16, 0.44, 0.18, tunic, 0.37, 0.68, 0));  // right arm
+
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.22, 7, 5), material(skin));
+  head.position.set(0, 1.16, 0);
+  head.castShadow = true;
+  group.add(head);
+
+  const helmet = new THREE.Mesh(new THREE.ConeGeometry(0.27, 0.3, 7), material(steel));
+  helmet.position.set(0, 1.4, 0);
+  helmet.castShadow = true;
+  group.add(helmet);
+
+  group.add(box(0.12, 0.07, 0.08, dark, 0, 1.16, 0.21)); // visor, "+z" is forward
+
+  const shield = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.24, 0.08, 8), material(0x8fb6d6));
+  shield.rotation.z = Math.PI / 2; // disc faces sideways
+  shield.position.set(-0.47, 0.7, 0);
+  shield.castShadow = true;
+  group.add(shield);
+}
+
+function buildPillar(group) {
+  const stone = 0x9db4c8;
+  const dark = 0x7c93a8;
+  const snow = 0xf3f9ff;
+
+  const base = cyl(0.44, 0.5, 0.22, dark);
+  base.position.y = 0.11;
+  group.add(base);
+
+  const shaft = cyl(0.32, 0.4, 1.35, stone);
+  shaft.position.y = 0.9;
+  group.add(shaft);
+
+  const cap = cyl(0.36, 0.4, 0.16, stone);
+  cap.position.y = 1.64;
+  group.add(cap);
+
+  const snowCap = cyl(0.34, 0.39, 0.15, snow);
+  snowCap.position.y = 1.76;
+  group.add(snowCap);
+
+  const chip = box(0.22, 0.16, 0.3, dark, 0.24, 1.55, 0.08); // broken chunk
+  group.add(chip);
+}
+
+function buildWall(group) {
+  group.add(box(1.0, 1.05, 0.5, 0x93aabe, 0, 0.525, 0));      // block
+  group.add(box(1.0, 0.14, 0.56, 0x6f869a, 0, 0.07, 0));      // base trim
+  group.add(box(1.04, 0.12, 0.56, 0xf3f9ff, 0, 1.1, 0));      // snow
+}
+
+export function createEntityMesh(kind) {
+  const group = new THREE.Group();
+  if (kind === 'player') buildPlayer(group);
+  else if (kind === 'pillar') buildPillar(group);
+  else if (kind === 'wall') buildWall(group);
+  else throw new Error(`Unknown entity kind: ${kind}`);
+  group.userData.kind = kind;
+  return group;
+}
+=== END FILE ===
+=== FILE: src/render.js ===
+// Three.js presentation layer: room, props, player, camera, lights, snow.
+// It knows nothing about game rules; main.js feeds it player state + tick alpha.
+
+import * as THREE from 'three';
+import { createEntityMesh } from './entities.js';
+import { ROOM_SIZE, MIN, MAX, pillars, brokenWall } from './world.js';
+
+const CENTER = (MIN + MAX) / 2;
+
+function mulberry32(seed) {
+  return function random() {
+    seed |= 0;
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+export class Render {
+  constructor(container) {
+    this.container = container;
+
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    this.renderer.setSize(window.innerWidth, window.innerHeight);
+    this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.outputColorSpace = THREE.SRGBColorSpace;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.05;
+    container.appendChild(this.renderer.domElement);
+
+    this.scene = new THREE.Scene();
+    this.scene.background = new THREE.Color(0xb9d3e6);
+    this.scene.fog = new THREE.Fog(0xb9d3e6, 21, 45);
+
+    // Angled OSRS-like camera looking down at the player from the south-east.
+    this.camera = new THREE.PerspectiveCamera(48, window.innerWidth / window.innerHeight, 0.1, 200);
+    this.camOffset = new THREE.Vector3(6.6, 10.4, 6.6); // distance ~14, pitch ~49 degrees
+    this.follow = new THREE.Vector3(CENTER, 0, CENTER);
+    this.camPos = this.follow.clone().add(this.camOffset);
+    this.camLook = new THREE.Vector3(CENTER, 0.9, CENTER);
+    this.camera.position.copy(this.camPos);
+    this.camera.lookAt(this.camLook);
+
+    this._tmpA = new THREE.Vector3();
+    this._tmpB = new THREE.Vector3();
+
+    this._buildLights();
+    this._buildFloor();
+    this._buildWalls();
+    this._buildProps();
+    this._buildPlayer();
+    this._buildSnow();
+
+    this._onResize = () => this.resize();
+    window.addEventListener('resize', this._onResize);
+  }
+
+  _buildLights() {
+    const hemi = new THREE.HemisphereLight(0xdcecff, 0x2c3a4a, 1.15);
+    this.scene.add(hemi);
+
+    const sun = new THREE.DirectionalLight(0xfff2d8, 2.1);
+    sun.position.set(9, 17, 7);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048);
+    sun.shadow.camera.left = -13;
+    sun.shadow.camera.right = 13;
+    sun.shadow.camera.top = 13;
+    sun.shadow.camera.bottom = -13;
+    sun.shadow.camera.near = 1;
+    sun.shadow.camera.far = 55;
+    sun.shadow.camera.updateProjectionMatrix();
+    sun.shadow.bias = -0.0008;
+    sun.shadow.normalBias = 0.03;
+    sun.target.position.set(CENTER, 0, CENTER);
+    this.scene.add(sun);
+    this.scene.add(sun.target);
+  }
+
+  _buildFloor() {
+    // Dark base plane shows through tile gaps as thin grid lines.
+    const base = new THREE.Mesh(
+      new THREE.PlaneGeometry(ROOM_SIZE + 0.2, ROOM_SIZE + 0.2),
+      new THREE.MeshStandardMaterial({ color: 0x22384a, roughness: 1, metalness: 0 })
+    );
+    base.rotation.x = -Math.PI / 2;
+    base.position.set(CENTER, -0.16, CENTER);
+    base.receiveShadow = true;
+    this.scene.add(base);
+
+    // Slightly bevelled low ice tiles, one instance per tile.
+    const geo = new THREE.BoxGeometry(0.94, 0.18, 0.94);
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      flatShading: true,
+      roughness: 0.94,
+      metalness: 0.02,
+    });
+    const tiles = new THREE.InstancedMesh(geo, mat, ROOM_SIZE * ROOM_SIZE);
+    tiles.receiveShadow = true;
+
+    const rand = mulberry32(1337);
+    const dummy = new THREE.Object3D();
+    const color = new THREE.Color();
+    let i = 0;
+    for (let x = MIN; x <= MAX; x++) {
+      for (let z = MIN; z <= MAX; z++) {
+        dummy.position.set(x, -0.09, z);
+        dummy.rotation.set(0, 0, 0);
+        dummy.updateMatrix();
+        tiles.setMatrixAt(i, dummy.matrix);
+        const t = rand();
+        color.setHSL(0.56 + t * 0.03, 0.16 + rand() * 0.14, 0.76 + rand() * 0.1, THREE.SRGBColorSpace);
+        tiles.setColorAt(i, color);
+        i++;
+      }
+    }
+    tiles.instanceMatrix.needsUpdate = true;
+    if (tiles.instanceColor) tiles.instanceColor.needsUpdate = true;
+    this.scene.add(tiles);
+  }
+
+  _buildWalls() {
+    const proto = createEntityMesh('wall');
+    const runs = [
+      { x: CENTER, z: MIN, rot: 0 },
+      { x: CENTER, z: MAX, rot: 0 },
+      { x: MIN, z: CENTER, rot: Math.PI / 2 },
+      { x: MAX, z: CENTER, rot: Math.PI / 2 },
+    ];
+    for (const run of runs) {
+      const wall = proto.clone();
+      wall.position.set(run.x, 0, run.z);
+      wall.rotation.y = run.rot;
+      wall.scale.set(ROOM_SIZE, 1, 1); // stretch the 1-tile prototype into a run
+      this.scene.add(wall);
+    }
+  }
+
+  _buildProps() {
+    for (const p of pillars) {
+      const mesh = createEntityMesh('pillar');
+      mesh.position.set(p.x, 0, p.z);
+      mesh.rotation.y = ((p.x * 7 + p.z * 13) % 8) * (Math.PI / 4);
+      this.scene.add(mesh);
+    }
+    for (const b of brokenWall) {
+      const mesh = createEntityMesh('wall');
+      mesh.position.set(b.x, 0, b.z);
+      mesh.scale.set(1, 0.65, 1); // collapsed / broken height
+      this.scene.add(mesh);
+    }
+  }
+
+  _buildPlayer() {
+    this.playerMesh = createEntityMesh('player');
+    this.playerMesh.position.set(CENTER, 0, CENTER);
+    this.scene.add(this.playerMesh);
+  }
+
+  _buildSnow() {
+    const count = 900;
+    const positions = new Float32Array(count * 3);
+    this.snowSpeeds = new Float32Array(count);
+    const rand = mulberry32(99);
+    for (let i = 0; i < count; i++) {
+      positions[i * 3] = -1 + rand() * 17;
+      positions[i * 3 + 1] = rand() * 13;
+      positions[i * 3 + 2] = -1 + rand() * 17;
+      this.snowSpeeds[i] = 0.6 + rand() * 1.1;
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    const mat = new THREE.PointsMaterial({
+      color: 0xffffff,
+      size: 0.14,
+      sizeAttenuation: true,
+      transparent: true,
+      opacity: 0.85,
+      depthWrite: false,
+    });
+    this.snow = new THREE.Points(geo, mat);
+    this.snow.frustumCulled = false;
+    this.snowCount = count;
+    this.scene.add(this.snow);
+  }
+
+  // player: { x, z, prevX, prevZ, facing: {x,z} }
+  // alpha: 0..1 progress through the current tick; moving: did the last tick move?
+  update(dt, player, alpha, moving) {
+    const clamped = Math.min(dt, 0.1);
+
+    const ix = player.prevX + (player.x - player.prevX) * alpha;
+    const iz = player.prevZ + (player.z - player.prevZ) * alpha;
+    const bob = moving ? Math.sin(alpha * Math.PI) * 0.11 : 0;
+    this.playerMesh.position.set(ix, bob, iz);
+
+    // Smoothly turn toward the facing direction (model front is +z).
+    const targetYaw = Math.atan2(player.facing.x, player.facing.z);
+    let delta = targetYaw - this.playerMesh.rotation.y;
+    delta = Math.atan2(Math.sin(delta), Math.cos(delta));
+    this.playerMesh.rotation.y += delta * (1 - Math.exp(-16 * clamped));
+
+    // Camera glides toward the interpolated player position.
+    this.follow.lerp(this._tmpA.set(ix, 0, iz), 1 - Math.exp(-14 * clamped));
+    this._tmpB.copy(this.follow).add(this.camOffset);
+    this.camPos.lerp(this._tmpB, 1 - Math.exp(-6 * clamped));
+    this.camera.position.copy(this.camPos);
+    this.camLook.set(this.follow.x, 0.9, this.follow.z);
+    this.camera.lookAt(this.camLook);
+
+    // Drifting snow.
+    const attr = this.snow.geometry.attributes.position;
+    for (let i = 0; i < this.snowCount; i++) {
+      let y = attr.getY(i) - this.snowSpeeds[i] * clamped;
+      let x = attr.getX(i) + clamped * 0.35;
+      if (y < -0.2) y += 13.5;
+      if (x > 16) x -= 17;
+      attr.setX(i, x);
+      attr.setY(i, y);
+    }
+    attr.needsUpdate = true;
+  }
+
+  render() {
+    this.renderer.render(this.scene, this.camera);
+  }
+
+  resize() {
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    this.camera.aspect = w / h;
+    this.camera.updateProjectionMatrix();
+    this.renderer.setSize(w, h);
+  }
+}
+=== END FILE ===
+=== FILE: src/main.js ===
+// Rimefall milestone 1: grid, fixed ticks, movement, input, placeholder visuals.
+
+import { Input } from './input.js';
+import { Ticker } from './tick.js';
+import { Render } from './render.js';
+import { SPAWN, blockers, isWalkable } from './world.js';
+
+const hud = {
+  tick: document.getElementById('hud-tick'),
+  tile: document.getElementById('hud-tile'),
+  input: document.getElementById('hud-input'),
+  toast: document.getElementById('toast'),
+  pause: document.getElementById('pause-overlay'),
+};
+
+let toastTimer = 0;
+function showToast(text, ms = 3000) {
+  hud.toast.textContent = text;
+  hud.toast.classList.add('visible');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => hud.toast.classList.remove('visible'), ms);
+}
+
+const ticker = new Ticker();
+const render = new Render(document.getElementById('app'));
+
+const player = {
+  x: SPAWN.x,
+  z: SPAWN.z,
+  prevX: SPAWN.x,
+  prevZ: SPAWN.z,
+  facing: { x: 0, z: 1 }, // facing south (+z) at spawn
+  moved: false,
+};
+
+const input = new Input({ onPause: togglePause, onToast: showToast });
+
+function togglePause() {
+  ticker.setPaused(!ticker.paused);
+  hud.pause.classList.toggle('visible', ticker.paused);
+}
+
+// One tile per tick; diagonals need target + both orthogonal neighbours free.
+function tryMove(dx, dz) {
+  const nx = player.x + dx;
+  const nz = player.z + dz;
+  if (!isWalkable(nx, nz)) return false;
+  if (dx !== 0 && dz !== 0) {
+    if (!isWalkable(player.x + dx, player.z)) return false;
+    if (!isWalkable(player.x, player.z + dz)) return false;
+  }
+  player.x = nx;
+  player.z = nz;
+  return true;
+}
+
+ticker.subscribe(() => {
+  // Interpolation runs from the tile we were on at the start of this tick.
+  player.prevX = player.x;
+  player.prevZ = player.z;
+  player.moved = false;
+
+  for (const action of input.consumeActions()) {
+    // Combat / gear / food arrive in later milestones.
+    console.log(`[rimefall] action buffered: ${action} (milestone 1 has no combat)`);
+  }
+
+  const dir = input.getDirection();
+  if (dir) {
+    player.facing = { x: dir.x, z: dir.z }; // last attempted direction
+    player.moved = tryMove(dir.x, dir.z);
+  }
+});
+
+const FACING_NAMES = {
+  '0,1': 'south',
+  '0,-1': 'north',
+  '1,0': 'east',
+  '-1,0': 'west',
+  '1,1': 'south-east',
+  '1,-1': 'north-east',
+  '-1,1': 'south-west',
+  '-1,-1': 'north-west',
+};
+
+function facingName(f) {
+  return FACING_NAMES[`${f.x},${f.z}`] || 'south';
+}
+
+// Test hook for the automated director.
+window.__rimefall = {
+  get tick() {
+    return ticker.tick;
+  },
+  get alpha() {
+    return ticker.alpha;
+  },
+  get player() {
+    return {
+      x: player.x,
+      z: player.z,
+      facing: { x: player.facing.x, z: player.facing.z },
+      facingName: facingName(player.facing),
+    };
+  },
+  get inputDevice() {
+    return input.device;
+  },
+  get paused() {
+    return ticker.paused;
+  },
+  isWalkable,
+  blockers,
+};
+
+const hudState = { tick: -1, tile: '', input: '' };
+function updateHud() {
+  if (ticker.tick !== hudState.tick) {
+    hudState.tick = ticker.tick;
+    hud.tick.textContent = String(ticker.tick);
+  }
+  const tile = `(${player.x}, ${player.z})`;
+  if (tile !== hudState.tile) {
+    hudState.tile = tile;
+    hud.tile.textContent = tile;
+  }
+  if (input.device !== hudState.input) {
+    hudState.input = input.device;
+    hud.input.textContent = input.device;
+  }
+}
+
+let last = -1;
+let ready = false;
+
+function frame(now) {
+  requestAnimationFrame(frame);
+
+  if (last < 0) last = now;
+  const dt = Math.min((now - last) / 1000, 0.1);
+  last = now;
+
+  input.pollGamepads();
+  ticker.update(now);
+  render.update(dt, player, ticker.alpha, player.moved);
+  render.render();
+  updateHud();
+
+  if (!ready) {
+    ready = true;
+    console.log('[rimefall] ready');
+  }
+}
+
+requestAnimationFrame(frame);
+=== END FILE ===
