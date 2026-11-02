@@ -7,6 +7,22 @@ import { ROOM_SIZE, MIN, MAX, pillars, brokenWall } from './world.js';
 
 const CENTER = (MIN + MAX) / 2;
 
+// Snow volume around the play area. Flakes that drift within SNOW_SAFE_RADIUS
+// of the camera are recycled, so none ever balloon in the foreground.
+const SNOW_BOUNDS = {
+  minX: -1.5,
+  maxX: ROOM_SIZE + 0.5,
+  minZ: -1.5,
+  maxZ: ROOM_SIZE + 0.5,
+  minY: -0.3,
+  maxY: 11.0,
+};
+const SNOW_WIDTH_X = SNOW_BOUNDS.maxX - SNOW_BOUNDS.minX;
+const SNOW_WIDTH_Z = SNOW_BOUNDS.maxZ - SNOW_BOUNDS.minZ;
+const SNOW_HEIGHT = SNOW_BOUNDS.maxY - SNOW_BOUNDS.minY;
+const SNOW_SAFE_RADIUS = 4.6;
+const SNOW_SAFE_RADIUS_SQ = SNOW_SAFE_RADIUS * SNOW_SAFE_RADIUS;
+
 function mulberry32(seed) {
   return function random() {
     seed |= 0;
@@ -28,7 +44,7 @@ export class Render {
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.05;
+    this.renderer.toneMappingExposure = 0.98;
     container.appendChild(this.renderer.domElement);
 
     this.scene = new THREE.Scene();
@@ -36,8 +52,9 @@ export class Render {
     this.scene.fog = new THREE.Fog(0xb9d3e6, 21, 45);
 
     // Angled OSRS-like camera looking down at the player from the south-east.
-    this.camera = new THREE.PerspectiveCamera(48, window.innerWidth / window.innerHeight, 0.1, 200);
-    this.camOffset = new THREE.Vector3(6.6, 10.4, 6.6); // distance ~14, pitch ~49 degrees
+    // Pulled back ~10% from milestone 1 with a slightly tighter FOV.
+    this.camera = new THREE.PerspectiveCamera(44, window.innerWidth / window.innerHeight, 0.1, 200);
+    this.camOffset = new THREE.Vector3(7.26, 11.44, 7.26);
     this.follow = new THREE.Vector3(CENTER, 0, CENTER);
     this.camPos = this.follow.clone().add(this.camOffset);
     this.camLook = new THREE.Vector3(CENTER, 0.9, CENTER);
@@ -52,6 +69,7 @@ export class Render {
     this._buildWalls();
     this._buildProps();
     this._buildPlayer();
+    this._buildTileMarker();
     this._buildSnow();
 
     this._onResize = () => this.resize();
@@ -59,10 +77,12 @@ export class Render {
   }
 
   _buildLights() {
-    const hemi = new THREE.HemisphereLight(0xdcecff, 0x2c3a4a, 1.15);
+    // Lower ambient than milestone 1 so pillars/player keep readable shading
+    // and the sun casts visible shadows onto the ice floor.
+    const hemi = new THREE.HemisphereLight(0xdcecff, 0x273645, 0.82);
     this.scene.add(hemi);
 
-    const sun = new THREE.DirectionalLight(0xfff2d8, 2.1);
+    const sun = new THREE.DirectionalLight(0xfff2d8, 2.0);
     sun.position.set(9, 17, 7);
     sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
@@ -81,22 +101,22 @@ export class Render {
   }
 
   _buildFloor() {
-    // Dark base plane shows through tile gaps as thin grid lines.
+    // Darker blue base shows through the tile gaps as subtle grid lines.
     const base = new THREE.Mesh(
       new THREE.PlaneGeometry(ROOM_SIZE + 0.2, ROOM_SIZE + 0.2),
-      new THREE.MeshStandardMaterial({ color: 0x22384a, roughness: 1, metalness: 0 })
+      new THREE.MeshStandardMaterial({ color: 0x243c50, roughness: 1, metalness: 0 })
     );
     base.rotation.x = -Math.PI / 2;
     base.position.set(CENTER, -0.16, CENTER);
     base.receiveShadow = true;
     this.scene.add(base);
 
-    // Slightly bevelled low ice tiles, one instance per tile.
-    const geo = new THREE.BoxGeometry(0.94, 0.18, 0.94);
+    // Low ice tiles: pale blue-grey with a mix of bluer ice and whiter snow.
+    const geo = new THREE.BoxGeometry(0.92, 0.18, 0.92);
     const mat = new THREE.MeshStandardMaterial({
       color: 0xffffff,
       flatShading: true,
-      roughness: 0.94,
+      roughness: 0.92,
       metalness: 0.02,
     });
     const tiles = new THREE.InstancedMesh(geo, mat, ROOM_SIZE * ROOM_SIZE);
@@ -112,8 +132,23 @@ export class Render {
         dummy.rotation.set(0, 0, 0);
         dummy.updateMatrix();
         tiles.setMatrixAt(i, dummy.matrix);
-        const t = rand();
-        color.setHSL(0.56 + t * 0.03, 0.16 + rand() * 0.14, 0.76 + rand() * 0.1, THREE.SRGBColorSpace);
+
+        const ice = rand() < 0.38;
+        if (ice) {
+          color.setHSL(
+            0.55 + rand() * 0.02,
+            0.3 + rand() * 0.12,
+            0.68 + rand() * 0.08,
+            THREE.SRGBColorSpace
+          );
+        } else {
+          color.setHSL(
+            0.575 + rand() * 0.03,
+            0.08 + rand() * 0.08,
+            0.8 + rand() * 0.07,
+            THREE.SRGBColorSpace
+          );
+        }
         tiles.setColorAt(i, color);
         i++;
       }
@@ -157,35 +192,128 @@ export class Render {
 
   _buildPlayer() {
     this.playerMesh = createEntityMesh('player');
+    this.playerMesh.scale.setScalar(1.25); // reads more clearly at this camera distance
     this.playerMesh.position.set(CENTER, 0, CENTER);
     this.scene.add(this.playerMesh);
   }
 
-  _buildSnow() {
-    const count = 900;
-    const positions = new Float32Array(count * 3);
-    this.snowSpeeds = new Float32Array(count);
-    const rand = mulberry32(99);
-    for (let i = 0; i < count; i++) {
-      positions[i * 3] = -1 + rand() * 17;
-      positions[i * 3 + 1] = rand() * 13;
-      positions[i * 3 + 2] = -1 + rand() * 17;
-      this.snowSpeeds[i] = 0.6 + rand() * 1.1;
-    }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    const mat = new THREE.PointsMaterial({
-      color: 0xffffff,
-      size: 0.14,
-      sizeAttenuation: true,
+  _buildTileMarker() {
+    // Thin glowing square on the player's current logical tile.
+    const half = 0.42;
+    const points = [
+      new THREE.Vector3(-half, 0, -half),
+      new THREE.Vector3(half, 0, -half),
+      new THREE.Vector3(half, 0, half),
+      new THREE.Vector3(-half, 0, half),
+    ];
+    const geo = new THREE.BufferGeometry().setFromPoints(points);
+    const mat = new THREE.LineBasicMaterial({
+      color: 0xffd75e,
       transparent: true,
-      opacity: 0.85,
+      opacity: 0.6,
       depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      toneMapped: false,
     });
-    this.snow = new THREE.Points(geo, mat);
-    this.snow.frustumCulled = false;
-    this.snowCount = count;
-    this.scene.add(this.snow);
+    this.tileMarker = new THREE.LineLoop(geo, mat);
+    this.tileMarker.position.set(CENTER, 0.035, CENTER);
+    this.scene.add(this.tileMarker);
+  }
+
+  _createSnowTexture() {
+    // Soft round flake: white core fading to transparent, no external files.
+    const size = 64;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    const grad = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+    grad.addColorStop(0, 'rgba(255,255,255,1)');
+    grad.addColorStop(0.3, 'rgba(255,255,255,0.92)');
+    grad.addColorStop(0.65, 'rgba(255,255,255,0.35)');
+    grad.addColorStop(1, 'rgba(255,255,255,0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, size, size);
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.needsUpdate = true;
+    return tex;
+  }
+
+  _buildSnow() {
+    this._snowRand = mulberry32(99);
+    this._snowScratch = { x: 0, y: 0, z: 0 };
+    this.snowTime = 0;
+
+    const sprite = this._createSnowTexture();
+    // Three size buckets give gentle per-flake variation without a custom shader.
+    const layers = [
+      { count: 250, size: 0.07 },
+      { count: 350, size: 0.095 },
+      { count: 300, size: 0.12 },
+    ];
+
+    this.snowLayers = [];
+    for (const cfg of layers) {
+      const positions = new Float32Array(cfg.count * 3);
+      const speeds = new Float32Array(cfg.count);
+      const phases = new Float32Array(cfg.count);
+      const spawn = { x: 0, y: 0, z: 0 };
+
+      for (let i = 0; i < cfg.count; i++) {
+        this._spawnSnowPoint(spawn);
+        const i3 = i * 3;
+        positions[i3] = spawn.x;
+        positions[i3 + 1] = spawn.y;
+        positions[i3 + 2] = spawn.z;
+        speeds[i] = 0.45 + this._snowRand() * 0.9;
+        phases[i] = this._snowRand() * Math.PI * 2;
+      }
+
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+      const mat = new THREE.PointsMaterial({
+        map: sprite,
+        color: 0xffffff,
+        size: cfg.size,
+        sizeAttenuation: true,
+        transparent: true,
+        opacity: 0.8,
+        depthWrite: false,
+        alphaTest: 0.01,
+      });
+
+      const points = new THREE.Points(geo, mat);
+      points.frustumCulled = false;
+      this.scene.add(points);
+
+      this.snowLayers.push({
+        attr: geo.attributes.position,
+        positions,
+        speeds,
+        phases,
+        count: cfg.count,
+      });
+    }
+  }
+
+  _spawnSnowPoint(out) {
+    const cam = this.camera.position;
+    for (let attempt = 0; attempt < 8; attempt++) {
+      out.x = SNOW_BOUNDS.minX + this._snowRand() * SNOW_WIDTH_X;
+      out.y = SNOW_BOUNDS.minY + this._snowRand() * SNOW_HEIGHT;
+      out.z = SNOW_BOUNDS.minZ + this._snowRand() * SNOW_WIDTH_Z;
+      const dx = out.x - cam.x;
+      const dy = out.y - cam.y;
+      const dz = out.z - cam.z;
+      if (dx * dx + dy * dy + dz * dz > SNOW_SAFE_RADIUS_SQ) return;
+    }
+    // Very unlikely fallback: a spot across the room from the camera.
+    out.x = CENTER - 3;
+    out.y = 3.5;
+    out.z = CENTER - 3;
   }
 
   // player: { x, z, prevX, prevZ, facing: {x,z} }
@@ -204,6 +332,9 @@ export class Render {
     delta = Math.atan2(Math.sin(delta), Math.cos(delta));
     this.playerMesh.rotation.y += delta * (1 - Math.exp(-16 * clamped));
 
+    // True-tile marker snaps to the logical tile; it never interpolates.
+    this.tileMarker.position.set(player.x, 0.035, player.z);
+
     // Camera glides toward the interpolated player position.
     this.follow.lerp(this._tmpA.set(ix, 0, iz), 1 - Math.exp(-14 * clamped));
     this._tmpB.copy(this.follow).add(this.camOffset);
@@ -212,17 +343,44 @@ export class Render {
     this.camLook.set(this.follow.x, 0.9, this.follow.z);
     this.camera.lookAt(this.camLook);
 
-    // Drifting snow.
-    const attr = this.snow.geometry.attributes.position;
-    for (let i = 0; i < this.snowCount; i++) {
-      let y = attr.getY(i) - this.snowSpeeds[i] * clamped;
-      let x = attr.getX(i) + clamped * 0.35;
-      if (y < -0.2) y += 13.5;
-      if (x > 16) x -= 17;
-      attr.setX(i, x);
-      attr.setY(i, y);
+    // Drifting, swaying snow. Recycle anything that comes too close to the camera.
+    this.snowTime += clamped;
+    const camX = this.camera.position.x;
+    const camY = this.camera.position.y;
+    const camZ = this.camera.position.z;
+    const out = this._snowScratch;
+
+    for (const layer of this.snowLayers) {
+      const p = layer.positions;
+      for (let i = 0; i < layer.count; i++) {
+        const i3 = i * 3;
+        const phase = layer.phases[i];
+        let x = p[i3] + Math.sin(this.snowTime * 0.8 + phase) * 0.16 * clamped;
+        let y = p[i3 + 1] - layer.speeds[i] * clamped;
+        let z = p[i3 + 2] + Math.cos(this.snowTime * 0.65 + phase * 1.7) * 0.11 * clamped;
+
+        if (y < SNOW_BOUNDS.minY) y += SNOW_HEIGHT;
+        if (x < SNOW_BOUNDS.minX) x += SNOW_WIDTH_X;
+        else if (x > SNOW_BOUNDS.maxX) x -= SNOW_WIDTH_X;
+        if (z < SNOW_BOUNDS.minZ) z += SNOW_WIDTH_Z;
+        else if (z > SNOW_BOUNDS.maxZ) z -= SNOW_WIDTH_Z;
+
+        const dx = x - camX;
+        const dy = y - camY;
+        const dz = z - camZ;
+        if (dx * dx + dy * dy + dz * dz < SNOW_SAFE_RADIUS_SQ) {
+          this._spawnSnowPoint(out);
+          x = out.x;
+          y = out.y;
+          z = out.z;
+        }
+
+        p[i3] = x;
+        p[i3 + 1] = y;
+        p[i3 + 2] = z;
+      }
+      layer.attr.needsUpdate = true;
     }
-    attr.needsUpdate = true;
   }
 
   render() {
