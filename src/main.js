@@ -1,4 +1,4 @@
-// Rimefall milestone 1.1: camera-relative movement, pre-glide feel fixes.
+// Rimefall milestone 1.2: north-facing camera and OSRS-style mechanical movement.
 
 import { Input } from './input.js';
 import { Ticker } from './tick.js';
@@ -42,8 +42,8 @@ function togglePause() {
   hud.pause.classList.toggle('visible', ticker.paused);
 }
 
-// One tile per tick; diagonals need target + both orthogonal neighbours free.
-function canMove(dx, dz) {
+// A single logical step. Diagonals cannot cut through a blocked corner.
+function step(dx, dz) {
   const nx = player.x + dx;
   const nz = player.z + dz;
   if (!isWalkable(nx, nz)) return false;
@@ -51,40 +51,68 @@ function canMove(dx, dz) {
     if (!isWalkable(player.x + dx, player.z)) return false;
     if (!isWalkable(player.x, player.z + dz)) return false;
   }
+  player.x = nx;
+  player.z = nz;
   return true;
 }
 
-function tryMove(dx, dz) {
-  if (!canMove(dx, dz)) return false;
-  player.x += dx;
-  player.z += dz;
-  return true;
+// OSRS-like corner slide: a blocked diagonal falls back to a free cardinal
+// component, trying the larger stick component first (x/east-west on a tie).
+function tryMove(dx, dz, preferX) {
+  if (dx !== 0 && dz !== 0) {
+    if (step(dx, dz)) return { x: dx, z: dz };
+
+    const first = preferX ? { x: dx, z: 0 } : { x: 0, z: dz };
+    const second = preferX ? { x: 0, z: dz } : { x: dx, z: 0 };
+
+    if (step(first.x, first.z)) return first;
+    if (step(second.x, second.z)) return second;
+    return null;
+  }
+
+  return step(dx, dz) ? { x: dx, z: dz } : null;
 }
 
 let lastMoveDir = null;
-let movedThisFrame = false;
+const moveLog = [];
+const MAX_MOVE_LOG = 200;
 
-ticker.subscribe(() => {
-  // Interpolation starts from the tile we were on at the start of this tick.
-  player.prevX = player.x;
-  player.prevZ = player.z;
+ticker.subscribe((tick) => {
+  const fromX = player.x;
+  const fromZ = player.z;
+  player.prevX = fromX;
+  player.prevZ = fromZ;
   player.moved = false;
 
   for (const action of input.consumeActions()) {
     // Combat / gear / food arrive in later milestones.
-    console.log(`[rimefall] action buffered: ${action} (milestone 1.1 has no combat)`);
+    console.log(`[rimefall] action buffered: ${action} (milestone 1.2 has no combat)`);
   }
 
-  // Direction picking happens against the camera at tick time. The stick is
-  // sampled from the latest polled axes; releasing it before this tick = no move.
-  const dirs = render.projectedDirs(player.x, player.z);
-  const dir = input.getDirection(dirs);
-  lastMoveDir = dir ? { x: dir.x, z: dir.z } : null;
+  // useMovement() has already been evaluated this frame, before the ticker ran.
+  const intent = input.getMoveIntent();
+  let actual = null;
 
-  if (dir) {
-    player.facing = { x: dir.x, z: dir.z }; // last attempted direction
-    player.moved = tryMove(dir.x, dir.z);
-    if (player.moved) movedThisFrame = true;
+  if (intent && intent.dir) {
+    actual = tryMove(intent.dir.x, intent.dir.z, intent.preferX);
+  }
+
+  lastMoveDir = actual ? { x: actual.x, z: actual.z } : null;
+
+  if (actual) {
+    player.facing = { x: actual.x, z: actual.z };
+    player.moved = true;
+  }
+
+  moveLog.push({
+    tick,
+    fromX,
+    fromZ,
+    toX: player.x,
+    toZ: player.z,
+  });
+  if (moveLog.length > MAX_MOVE_LOG) {
+    moveLog.splice(0, moveLog.length - MAX_MOVE_LOG);
   }
 });
 
@@ -111,6 +139,7 @@ function isPlayStationId(id) {
     s.includes('dualshock') ||
     s.includes('dualsense') ||
     s.includes('wireless controller') ||
+    s.includes('playstation') ||
     s.includes('054c')
   );
 }
@@ -120,13 +149,15 @@ function updateHint() {
   const device = input.device;
 
   if (device.startsWith('gamepad')) {
-    const id = device.slice('gamepad: '.length);
+    const id = device.startsWith('gamepad: ')
+      ? device.slice('gamepad: '.length)
+      : device;
     const playstation = isPlayStationId(id);
     const key = playstation ? 'pad-playstation' : 'pad-xbox';
     if (hintKey !== key) {
-      hintEl.textContent = playstation
-        ? 'Left stick move · ✕ attack · □ eat · D-pad swap gear · Options pause'
-        : 'Left stick move · A attack · X eat · D-pad swap gear · Start pause';
+      hintEl.innerHTML = playstation
+        ? '<b>Left stick</b> move · <b>✕</b> attack · <b>□</b> eat · <b>D-pad</b> swap gear · <b>Options</b> pause'
+        : '<b>Left stick</b> move · <b>A</b> attack · <b>X</b> eat · <b>D-pad</b> swap gear · <b>Start</b> pause';
       hintKey = key;
     }
   } else if (hintKey !== 'keyboard') {
@@ -142,6 +173,9 @@ window.__rimefall = {
   },
   get alpha() {
     return ticker.alpha;
+  },
+  get lastTickTime() {
+    return ticker.lastTickTime;
   },
   get player() {
     return {
@@ -174,6 +208,9 @@ window.__rimefall = {
   get lastMoveDir() {
     return lastMoveDir ? { x: lastMoveDir.x, z: lastMoveDir.z } : null;
   },
+  get moveLog() {
+    return moveLog;
+  },
 };
 
 const hudState = { tick: -1, tile: '', input: '' };
@@ -194,61 +231,25 @@ function updateHud() {
   }
 }
 
-// Start-of-tick pre-glide: if the player is idle and movement input begins
-// mid-tick, move the mesh a little toward the predicted neighbour immediately.
-function updatePreGlide(now) {
-  if (ticker.paused) return;
-  if (player.moved || render.isCommittedMoving()) return;
-
-  const dirs = render.projectedDirs(player.x, player.z);
-  const dir = input.getDirection(dirs);
-
-  if (dir && canMove(dir.x, dir.z)) {
-    const remainingMs = Math.max(0, ticker.tickMs - ticker.acc);
-    render.preGlideTo(
-      player.x + dir.x,
-      player.z + dir.z,
-      now,
-      remainingMs,
-      ticker.tickMs
-    );
-  } else {
-    render.returnToTile(player.x, player.z, now);
-  }
-}
-
-let last = -1;
+let lastFrameTime = -1;
 let ready = false;
 
 function frame(now) {
   requestAnimationFrame(frame);
 
-  if (last < 0) last = now;
-  const dt = Math.min((now - last) / 1000, 0.1);
-  last = now;
+  if (lastFrameTime < 0) lastFrameTime = now;
+  let dt = (now - lastFrameTime) / 1000;
+  lastFrameTime = now;
+  if (!Number.isFinite(dt) || dt < 0) dt = 0;
+  dt = Math.min(dt, 0.1);
 
+  // Input is always sampled before the ticker, so a tick sees this frame's
+  // freshest stick/keyboard state.
   input.pollGamepads();
-  render.setPaused(ticker.paused, now);
+  input.updateMovement();
 
-  movedThisFrame = false;
   ticker.update(now);
-
-  if (movedThisFrame) {
-    const boundaryMs = now - ticker.acc;
-    render.requestMove(
-      player.x,
-      player.z,
-      boundaryMs,
-      ticker.tickMs,
-      player.prevX,
-      player.prevZ
-    );
-  }
-
-  render.update(dt, player, ticker.alpha, player.moved, now);
-
-  if (!ticker.paused) updatePreGlide(now);
-
+  render.update(dt, player, ticker.alpha);
   render.render();
   updateHud();
 

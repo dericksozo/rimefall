@@ -5,13 +5,23 @@ export const TICK_MS = 600;
 
 export class Ticker {
   constructor(tickMs = TICK_MS) {
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+
     this.tickMs = tickMs;
     this.tick = 0;
-    this.acc = 0;
-    this.alpha = 0;
     this.paused = false;
-    this.lastTime = -1;
     this.callbacks = [];
+
+    this.lastTickTime = now;
+    this.nextTickTime = now + this.tickMs;
+    this.alpha = 0;
+
+    this._onVisibilityChange = () => {
+      if (!document.hidden) this.resync();
+    };
+    if (typeof document !== 'undefined' && document.addEventListener) {
+      document.addEventListener('visibilitychange', this._onVisibilityChange);
+    }
   }
 
   subscribe(fn) {
@@ -22,37 +32,50 @@ export class Ticker {
     };
   }
 
+  // Resync rather than consuming a backlog after a pause, tab switch or stall.
+  // Alpha is held at 1 until the next scheduled tick so the mesh does not snap
+  // backward to the previous tile after a resumed tab.
+  resync(now = (typeof performance !== 'undefined' ? performance.now() : Date.now())) {
+    this.lastTickTime = now - this.tickMs;
+    this.nextTickTime = now + this.tickMs;
+    this.alpha = 1;
+  }
+
   setPaused(value) {
     const v = !!value;
     if (this.paused === v) return;
     this.paused = v;
-    // Resync the clock on resume so we never consume a giant backlog.
-    if (!v) this.lastTime = -1;
+    this.resync();
   }
 
   // Called once per rendered frame with a DOMHighResTimeStamp.
   update(now) {
-    if (this.lastTime < 0) {
-      this.lastTime = now;
+    if (this.paused) return;
+    if (!Number.isFinite(now)) return;
+
+    if (now < this.lastTickTime) {
+      this.resync(now);
       return;
     }
-    if (this.paused) return;
 
-    let dt = now - this.lastTime;
-    this.lastTime = now;
-    // Clamp to avoid a spiral of death after tab switches / long stalls.
-    if (dt < 0) dt = 0;
-    if (dt > this.tickMs * 5) dt = this.tickMs * 5;
+    if (now >= this.nextTickTime) {
+      const due = Math.floor((now - this.nextTickTime) / this.tickMs) + 1;
 
-    this.acc += dt;
-    let guard = 0;
-    while (this.acc >= this.tickMs && guard < 6) {
-      this.acc -= this.tickMs;
-      this.tick++;
-      guard++;
-      for (const cb of this.callbacks) cb(this.tick);
+      // More than two missed ticks means a hidden tab or long stall: resync
+      // instead of bursting through the backlog.
+      if (due > 2) {
+        this.resync(now);
+        return;
+      }
+
+      for (let i = 0; i < due; i++) {
+        this.lastTickTime = this.nextTickTime;
+        this.nextTickTime += this.tickMs;
+        this.tick++;
+        for (const cb of this.callbacks) cb(this.tick);
+      }
     }
-    if (this.acc >= this.tickMs) this.acc = this.tickMs - 0.0001; // safety
-    this.alpha = Math.min(1, Math.max(0, this.acc / this.tickMs));
+
+    this.alpha = Math.min(1, Math.max(0, (now - this.lastTickTime) / this.tickMs));
   }
 }

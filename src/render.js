@@ -7,16 +7,6 @@ import { ROOM_SIZE, MIN, MAX, pillars, brokenWall, SPAWN } from './world.js';
 
 const CENTER = (MIN + MAX) / 2;
 
-// Eight grid directions, clockwise from north/up.
-const GRID_DIRS = [
-  [0, -1], [1, -1], [1, 0], [1, 1],
-  [0, 1], [-1, 1], [-1, 0], [-1, -1],
-];
-
-const PREGLIDE_MAX_FRACTION = 0.35; // at most 35% of a tile before the tick
-const PREGLIDE_SPEED = 0.8;         // fraction per full tick, before the cap
-const RETURN_MS = 140;
-
 // Snow volume around the play area. Flakes that drift within SNOW_SAFE_RADIUS
 // of the camera are recycled, so none ever balloon in the foreground.
 const SNOW_BOUNDS = {
@@ -61,10 +51,10 @@ export class Render {
     this.scene.background = new THREE.Color(0xb9d3e6);
     this.scene.fog = new THREE.Fog(0xb9d3e6, 21, 45);
 
-    // Angled OSRS-like camera looking down at the player from the south-east.
-    // Pulled back ~10% from milestone 1 with a slightly tighter FOV.
+    // OSRS-style north-facing camera: due south of the player (+z), looking
+    // north (-z). Same pitch/distance as milestone 1.1, just yawed.
     this.camera = new THREE.PerspectiveCamera(44, window.innerWidth / window.innerHeight, 0.1, 200);
-    this.camOffset = new THREE.Vector3(7.26, 11.44, 7.26);
+    this.camOffset = new THREE.Vector3(0, 11.44, Math.hypot(7.26, 7.26));
     this.follow = new THREE.Vector3(SPAWN.x, 0, SPAWN.z);
     this.camPos = this.follow.clone().add(this.camOffset);
     this.camLook = new THREE.Vector3(SPAWN.x, 0.9, SPAWN.z);
@@ -84,18 +74,7 @@ export class Render {
     this._buildTileMarker();
     this._buildSnow();
 
-    // Visual movement state. Logical moves stay on tick boundaries; these
-    // glides only control where the rendered mesh is.
-    this.visX = SPAWN.x;
-    this.visZ = SPAWN.z;
-    this.moveMode = 'idle'; // 'idle' | 'pre' | 'return' | 'move'
-    this.glide = null;
     this.facingYaw = 0; // model front is +z; spawn faces south
-
-    // Glide times use a pause-aware game clock.
-    this.paused = false;
-    this._pauseStartedAt = 0;
-    this.clockOffset = 0;
 
     this._onResize = () => this.resize();
     window.addEventListener('resize', this._onResize);
@@ -372,194 +351,21 @@ export class Render {
     };
   }
 
-  // Screen angle of every grid step from the given tile, measured from screen
-  // up (0) clockwise, with CSS screen y pointing down.
-  projectedDirs(tileX, tileZ) {
-    const base = this.tileToScreen(tileX, tileZ);
-    const out = [];
-    for (const [dx, dz] of GRID_DIRS) {
-      const p = this.tileToScreen(tileX + dx, tileZ + dz);
-      const sx = p.x - base.x;
-      const sy = p.y - base.y;
-      out.push({ x: dx, z: dz, angle: Math.atan2(sx, -sy) });
-    }
-    return out;
-  }
-
-  // ---- pause-aware visual movement clock ----
-
-  setPaused(paused, nowMs = performance.now()) {
-    const now = nowMs / 1000;
-    if (paused) {
-      if (!this.paused) {
-        this.paused = true;
-        this._pauseStartedAt = now;
-      }
-    } else if (this.paused) {
-      this.paused = false;
-      this.clockOffset += now - this._pauseStartedAt;
-    }
-  }
-
-  _gameTime(nowMs) {
-    return nowMs / 1000 - this.clockOffset;
-  }
-
-  _faceTowards(dx, dz) {
-    if (dx * dx + dz * dz < 1e-8) return;
-    this.facingYaw = Math.atan2(dx, dz);
-  }
-
-  _visualAt(timeSec) {
-    const g = this.glide;
-    if (!g) return { x: this.visX, z: this.visZ };
-
-    const span = Math.max(1e-6, g.end - g.start);
-    let t = (timeSec - g.start) / span;
-    if (t < 0) t = 0;
-    else if (t > 1) t = 1;
-
-    let f;
-    if (this.moveMode === 'pre') {
-      f = t * g.fraction;
-    } else if (this.moveMode === 'return') {
-      f = t * t * (3 - 2 * t); // ease back
-    } else {
-      f = t; // committed move: constant speed, tile-to-tile
-    }
-
-    return {
-      x: g.fromX + (g.toX - g.fromX) * f,
-      z: g.fromZ + (g.toZ - g.fromZ) * f,
-    };
-  }
-
-  isCommittedMoving() {
-    return this.moveMode === 'move';
-  }
-
-  /**
-   * Start the visual glide for a logical move that committed at boundaryMs.
-   * If a pre-glide is active, continue from its ideal position at the tick
-   * boundary; otherwise start exactly on the previous logical tile so held
-   * movement remains constant-speed and hitch-free across ticks.
-   */
-  requestMove(toX, toZ, boundaryMs, tickMs, prevX = this.visX, prevZ = this.visZ) {
-    const boundary = this._gameTime(boundaryMs);
-    const from =
-      this.moveMode === 'pre' || this.moveMode === 'return'
-        ? this._visualAt(boundary)
-        : { x: prevX, z: prevZ };
-
-    this.moveMode = 'move';
-    this.glide = {
-      fromX: from.x,
-      fromZ: from.z,
-      toX,
-      toZ,
-      start: boundary,
-      end: boundary + tickMs / 1000,
-      fraction: 1,
-    };
-    this._faceTowards(toX - from.x, toZ - from.z);
-  }
-
-  preGlideTo(toX, toZ, nowMs, remainingMs, tickMs) {
-    if (this.moveMode === 'move') return;
-
-    if (
-      this.moveMode === 'pre' &&
-      this.glide &&
-      this.glide.toX === toX &&
-      this.glide.toZ === toZ
-    ) {
-      return;
-    }
-
-    const remaining = Math.max(0, remainingMs);
-    if (remaining <= 0) return;
-
-    const frac = Math.min(
-      PREGLIDE_MAX_FRACTION,
-      PREGLIDE_SPEED * (remaining / tickMs)
-    );
-    if (frac <= 0.0001) return;
-
-    const now = this._gameTime(nowMs);
-    this.moveMode = 'pre';
-    this.glide = {
-      fromX: this.visX,
-      fromZ: this.visZ,
-      toX,
-      toZ,
-      start: now,
-      end: now + remaining / 1000,
-      fraction: frac,
-    };
-    this._faceTowards(toX - this.visX, toZ - this.visZ);
-  }
-
-  returnToTile(x, z, nowMs) {
-    if (this.moveMode === 'move') return;
-
-    if (
-      this.moveMode === 'return' &&
-      this.glide &&
-      this.glide.toX === x &&
-      this.glide.toZ === z
-    ) {
-      return;
-    }
-
-    const dx = this.visX - x;
-    const dz = this.visZ - z;
-    if (dx * dx + dz * dz < 1e-8) {
-      this.moveMode = 'idle';
-      this.glide = null;
-      return;
-    }
-
-    const now = this._gameTime(nowMs);
-    this.moveMode = 'return';
-    this.glide = {
-      fromX: this.visX,
-      fromZ: this.visZ,
-      toX: x,
-      toZ: z,
-      start: now,
-      end: now + RETURN_MS / 1000,
-      fraction: 1,
-    };
-    // Keep the last gameplay facing while easing back to the tile.
-  }
-
   // player: { x, z, prevX, prevZ, facing: {x,z} }
-  // alpha: 0..1 progress through the current tick; moving: did the last tick move?
-  update(dt, player, alpha, moving, nowMs) {
-    const clamped = Math.min(dt, 0.1);
-    const now = this._gameTime(typeof nowMs === 'number' ? nowMs : performance.now());
+  // alpha: 0..1 progress through the current tick, straight from the ticker.
+  update(dt, player, alpha) {
+    const clamped = Number.isFinite(dt) ? Math.max(0, Math.min(dt, 0.1)) : 0;
+    const t = Math.min(1, Math.max(0, alpha));
 
-    if (!this.paused && this.glide) {
-      const g = this.glide;
-      const p = this._visualAt(now);
-      this.visX = p.x;
-      this.visZ = p.z;
+    // The player mesh is exactly the linear interpolation of the previous and
+    // current logical tiles. No pre-glide, easing, return glide or catch-up.
+    const x = player.prevX + (player.x - player.prevX) * t;
+    const z = player.prevZ + (player.z - player.prevZ) * t;
+    this.playerMesh.position.set(x, 0, z);
 
-      const span = Math.max(1e-6, g.end - g.start);
-      const t = (now - g.start) / span;
-      if (t >= 1 && this.moveMode !== 'pre') {
-        this.visX = g.toX;
-        this.visZ = g.toZ;
-        this.moveMode = 'idle';
-        this.glide = null;
-      }
-    }
-
-    // Single straight lerp on x and z together. No per-tile bob reset hitch.
-    this.playerMesh.position.set(this.visX, 0, this.visZ);
-
-    // Turn toward the actual movement vector; when idle keep the last facing.
-    let delta = this.facingYaw - this.playerMesh.rotation.y;
+    // Turn toward the actual move direction; when idle keep the last facing.
+    const targetYaw = Math.atan2(player.facing.x, player.facing.z);
+    let delta = targetYaw - this.playerMesh.rotation.y;
     delta = Math.atan2(Math.sin(delta), Math.cos(delta));
     this.playerMesh.rotation.y += delta * (1 - Math.exp(-18 * clamped));
 
@@ -567,7 +373,7 @@ export class Render {
     this.tileMarker.position.set(player.x, 0.035, player.z);
 
     // Camera glides toward the rendered player position.
-    this.follow.lerp(this._tmpA.set(this.visX, 0, this.visZ), 1 - Math.exp(-14 * clamped));
+    this.follow.lerp(this._tmpA.set(x, 0, z), 1 - Math.exp(-14 * clamped));
     this._tmpB.copy(this.follow).add(this.camOffset);
     this.camPos.lerp(this._tmpB, 1 - Math.exp(-6 * clamped));
     this.camera.position.copy(this.camPos);
@@ -586,29 +392,29 @@ export class Render {
       for (let i = 0; i < layer.count; i++) {
         const i3 = i * 3;
         const phase = layer.phases[i];
-        let x = p[i3] + Math.sin(this.snowTime * 0.8 + phase) * 0.16 * clamped;
-        let y = p[i3 + 1] - layer.speeds[i] * clamped;
-        let z = p[i3 + 2] + Math.cos(this.snowTime * 0.65 + phase * 1.7) * 0.11 * clamped;
+        let sx = p[i3] + Math.sin(this.snowTime * 0.8 + phase) * 0.16 * clamped;
+        let sy = p[i3 + 1] - layer.speeds[i] * clamped;
+        let sz = p[i3 + 2] + Math.cos(this.snowTime * 0.65 + phase * 1.7) * 0.11 * clamped;
 
-        if (y < SNOW_BOUNDS.minY) y += SNOW_HEIGHT;
-        if (x < SNOW_BOUNDS.minX) x += SNOW_WIDTH_X;
-        else if (x > SNOW_BOUNDS.maxX) x -= SNOW_WIDTH_X;
-        if (z < SNOW_BOUNDS.minZ) z += SNOW_WIDTH_Z;
-        else if (z > SNOW_BOUNDS.maxZ) z -= SNOW_WIDTH_Z;
+        if (sy < SNOW_BOUNDS.minY) sy += SNOW_HEIGHT;
+        if (sx < SNOW_BOUNDS.minX) sx += SNOW_WIDTH_X;
+        else if (sx > SNOW_BOUNDS.maxX) sx -= SNOW_WIDTH_X;
+        if (sz < SNOW_BOUNDS.minZ) sz += SNOW_WIDTH_Z;
+        else if (sz > SNOW_BOUNDS.maxZ) sz -= SNOW_WIDTH_Z;
 
-        const dx = x - camX;
-        const dy = y - camY;
-        const dz = z - camZ;
+        const dx = sx - camX;
+        const dy = sy - camY;
+        const dz = sz - camZ;
         if (dx * dx + dy * dy + dz * dz < SNOW_SAFE_RADIUS_SQ) {
           this._spawnSnowPoint(out);
-          x = out.x;
-          y = out.y;
-          z = out.z;
+          sx = out.x;
+          sy = out.y;
+          sz = out.z;
         }
 
-        p[i3] = x;
-        p[i3 + 1] = y;
-        p[i3 + 2] = z;
+        p[i3] = sx;
+        p[i3 + 1] = sy;
+        p[i3 + 2] = sz;
       }
       layer.attr.needsUpdate = true;
     }

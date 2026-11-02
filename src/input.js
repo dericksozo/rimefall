@@ -1,8 +1,8 @@
 // Unified keyboard + standard-gamepad input.
-// Movement intent is expressed in SCREEN space and mapped onto the grid using
-// the renderer's projected grid directions. Sticks are sampled at tick time.
+// Movement maps directly to grid directions because the camera faces north.
+// Stick processing runs every frame with persistent hysteresis state.
 
-const KEY_SCREEN = {
+const KEY_DIR = {
   KeyW: [0, -1], ArrowUp: [0, -1],
   KeyS: [0, 1], ArrowDown: [0, 1],
   KeyA: [-1, 0], ArrowLeft: [-1, 0],
@@ -16,25 +16,28 @@ const KEY_ACTION = {
   Numpad1: 'swap1', Numpad2: 'swap2', Numpad3: 'swap3',
 };
 
-// Standard mapping buttons used by milestone 1.1.
+// Standard mapping buttons. D-pad is action-only; it never moves the player.
 const PAD_ACTION = { 0: 'attack', 2: 'eat', 14: 'swap1', 12: 'swap2', 15: 'swap3' };
 const PAD_PAUSE_BUTTON = 9;
 
 export const STICK_DEADZONE = 0.35;
+export const STICK_RELEASE_DEADZONE = 0.25;
 
+const STICK_ACTIVITY_DELTA = 0.08;
 const TAU = Math.PI * 2;
+const CARDINAL_HALF_WIDTH = (Math.PI * 35) / 180; // 70-degree cardinals
+const DIAGONAL_HALF_WIDTH = Math.PI / 18;         // diagonals only within 10 degrees
+const DIRECTION_HYSTERESIS = Math.PI / 15;        // 12 degrees past a boundary
 
-// Fallback used when a caller does not supply camera-projected directions.
-// This keeps pickGridDir/Input useful in isolation (identity screen = grid axes).
-const DEFAULT_PROJECTED_DIRS = [
-  { x: 0, z: -1, angle: 0 },
-  { x: 1, z: -1, angle: Math.PI / 4 },
-  { x: 1, z: 0, angle: Math.PI / 2 },
-  { x: 1, z: 1, angle: (3 * Math.PI) / 4 },
-  { x: 0, z: 1, angle: Math.PI },
-  { x: -1, z: 1, angle: (5 * Math.PI) / 4 },
-  { x: -1, z: 0, angle: (3 * Math.PI) / 2 },
-  { x: -1, z: -1, angle: (7 * Math.PI) / 4 },
+const DIRECTIONS = [
+  { x: 0, z: -1, angle: 0, halfAngle: CARDINAL_HALF_WIDTH, diagonal: false },
+  { x: 1, z: -1, angle: Math.PI / 4, halfAngle: DIAGONAL_HALF_WIDTH, diagonal: true },
+  { x: 1, z: 0, angle: Math.PI / 2, halfAngle: CARDINAL_HALF_WIDTH, diagonal: false },
+  { x: 1, z: 1, angle: (3 * Math.PI) / 4, halfAngle: DIAGONAL_HALF_WIDTH, diagonal: true },
+  { x: 0, z: 1, angle: Math.PI, halfAngle: CARDINAL_HALF_WIDTH, diagonal: false },
+  { x: -1, z: 1, angle: (5 * Math.PI) / 4, halfAngle: DIAGONAL_HALF_WIDTH, diagonal: true },
+  { x: -1, z: 0, angle: (3 * Math.PI) / 2, halfAngle: CARDINAL_HALF_WIDTH, diagonal: false },
+  { x: -1, z: -1, angle: (7 * Math.PI) / 4, halfAngle: DIAGONAL_HALF_WIDTH, diagonal: true },
 ];
 
 function normalizeAngle(a) {
@@ -47,133 +50,54 @@ function angleDistance(a, b) {
   return Math.min(d, TAU - d);
 }
 
-function normalizeProjectedDirs(projectedDirs) {
-  let list = null;
-
-  if (Array.isArray(projectedDirs)) {
-    list = projectedDirs;
-  } else if (projectedDirs && typeof projectedDirs === 'object') {
-    // Also tolerate a {"x,z": angle} map.
-    list = [];
-    for (const key of Object.keys(projectedDirs)) {
-      const m = /^(-?\d+),(-?\d+)$/.exec(key);
-      if (!m) continue;
-      const value = projectedDirs[key];
-      const angle = typeof value === 'number' ? value : value && value.angle;
-      list.push({ x: Number(m[1]), z: Number(m[2]), angle });
-    }
-  }
-
-  if (!list || list.length === 0) return DEFAULT_PROJECTED_DIRS.slice();
-
-  const out = [];
-  for (const entry of list) {
-    if (!entry) continue;
-
-    let x = entry.x;
-    let z = entry.z;
-    let angle = entry.angle;
-
-    if (entry.dir) {
-      if (Array.isArray(entry.dir)) {
-        x = entry.dir[0];
-        z = entry.dir[1];
-      } else {
-        x = entry.dir.x;
-        z = entry.dir.z;
-      }
-    }
-
-    if (typeof x !== 'number' || typeof z !== 'number') continue;
-    if (typeof angle !== 'number') angle = Math.atan2(x, -z);
-    out.push({ x, z, angle });
-  }
-
-  return out.length ? out : DEFAULT_PROJECTED_DIRS.slice();
+function signedAngleDifference(a, b) {
+  let d = normalizeAngle(a) - normalizeAngle(b);
+  if (d > Math.PI) d -= TAU;
+  if (d <= -Math.PI) d += TAU;
+  return d;
 }
 
-function classifyProjectedDirs(dirs) {
-  const cardinals = [];
-  const used = new Set();
-
-  // Greedily assign the four grid dirs closest to screen up/right/down/left.
-  for (let k = 0; k < 4; k++) {
-    const ref = (k * Math.PI) / 2;
-    let best = -1;
-    let bestDist = Infinity;
-    for (let i = 0; i < dirs.length; i++) {
-      if (used.has(i)) continue;
-      const dist = angleDistance(dirs[i].angle, ref);
-      if (dist < bestDist) {
-        bestDist = dist;
-        best = i;
-      }
-    }
-    if (best >= 0) {
-      used.add(best);
-      cardinals.push(dirs[best]);
-    }
+function directionInfo(x, z) {
+  for (const dir of DIRECTIONS) {
+    if (dir.x === x && dir.z === z) return dir;
   }
-
-  const diagonals = [];
-  for (let i = 0; i < dirs.length; i++) {
-    if (!used.has(i)) diagonals.push(dirs[i]);
-  }
-
-  return { cardinals, diagonals };
+  return null;
 }
 
 /**
- * Pure screen-angle -> grid-direction snapping.
- *
- * screenAngle: radians, 0 = screen up, PI/2 = screen right, clockwise.
- * projectedDirs: array of { x, z, angle } where angle is the projected screen
- * angle of that grid direction measured the same way.
- *
- * Screen diagonals own 30-degree sectors centred on 45/135/225/315 degrees;
- * screen cardinals own the remaining 60-degree sectors.
+ * Pure angle -> grid-direction snapping.
+ * 0 = north/up, PI/2 = east/right, PI = south/down, 3PI/2 = west/left.
+ * Cardials own 70-degree sectors; diagonals exist only within 10 degrees of
+ * 45/135/225/315.
  */
-export function pickGridDir(screenAngle, projectedDirs) {
-  const dirs = normalizeProjectedDirs(projectedDirs);
-  if (!dirs.length || typeof screenAngle !== 'number' || !Number.isFinite(screenAngle)) {
-    return null;
-  }
+export function pickGridDir(angle) {
+  if (typeof angle !== 'number' || !Number.isFinite(angle)) return null;
 
-  const { cardinals, diagonals } = classifyProjectedDirs(dirs);
-  const angle = normalizeAngle(screenAngle);
+  const a = normalizeAngle(angle);
+  let bestDiagonal = null;
+  let bestDiagonalDist = Infinity;
+  let bestCardinal = null;
+  let bestCardinalDist = Infinity;
 
-  const diagRefs = [
-    Math.PI / 4,
-    (3 * Math.PI) / 4,
-    (5 * Math.PI) / 4,
-    (7 * Math.PI) / 4,
-  ];
-
-  let diagRef = diagRefs[0];
-  let diagDist = Infinity;
-  for (const ref of diagRefs) {
-    const dist = angleDistance(angle, ref);
-    if (dist < diagDist) {
-      diagDist = dist;
-      diagRef = ref;
+  for (const dir of DIRECTIONS) {
+    const dist = angleDistance(a, dir.angle);
+    if (dir.diagonal) {
+      if (dist < bestDiagonalDist) {
+        bestDiagonalDist = dist;
+        bestDiagonal = dir;
+      }
+    } else if (dist < bestCardinalDist) {
+      bestCardinalDist = dist;
+      bestCardinal = dir;
     }
   }
 
-  const useDiagonal = diagDist <= Math.PI / 12 + 1e-9;
-  const pool = useDiagonal ? (diagonals.length ? diagonals : cardinals) : cardinals;
-  const target = useDiagonal ? diagRef : angle;
+  const chosen =
+    bestDiagonal && bestDiagonalDist <= DIAGONAL_HALF_WIDTH + 1e-9
+      ? bestDiagonal
+      : bestCardinal;
 
-  let best = null;
-  let bestDist = Infinity;
-  for (const d of pool) {
-    const dist = angleDistance(d.angle, target);
-    if (dist < bestDist) {
-      bestDist = dist;
-      best = d;
-    }
-  }
-
-  return best ? { x: best.x, z: best.z } : null;
+  return chosen ? { x: chosen.x, z: chosen.z } : null;
 }
 
 export class Input {
@@ -185,18 +109,20 @@ export class Input {
     this.keys = new Set();
     this.actions = [];
 
-    // Latest polled left-stick axes (axis 1 positive = screen down).
     this.padAxes = { x: 0, y: 0 };
     this.padButtonState = new Map();
     this.connectedIds = new Set();
     this.notifiedIds = new Set();
+
+    this.stickHeld = null;    // persistent snapped stick direction
+    this.heldDir = null;      // final current direction for this frame
+    this.currentIntent = null;
+
     this._padStickActive = false;
     this._activePadId = null;
 
     this._bindKeyboard();
 
-    // Pads may be present before load (no gamepadconnected event) or connect
-    // later. The frame loop also polls, but listening keeps this responsive.
     const poll = () => this.pollGamepads();
     window.addEventListener('gamepadconnected', poll);
     window.addEventListener('gamepaddisconnected', poll);
@@ -213,9 +139,9 @@ export class Input {
         return;
       }
 
-      if (KEY_SCREEN[e.code]) {
+      if (KEY_DIR[e.code]) {
         e.preventDefault();
-        this.device = 'keyboard';
+        if (!e.repeat) this.device = 'keyboard';
         this.keys.add(e.code);
         return;
       }
@@ -223,55 +149,118 @@ export class Input {
       const action = KEY_ACTION[e.code];
       if (action) {
         e.preventDefault();
-        this.device = 'keyboard';
-        if (!e.repeat) this.actions.push(action);
+        if (!e.repeat) {
+          this.device = 'keyboard';
+          this.actions.push(action);
+        }
       }
     });
 
     window.addEventListener('keyup', (e) => {
-      if (KEY_SCREEN[e.code]) this.keys.delete(e.code);
+      if (KEY_DIR[e.code]) this.keys.delete(e.code);
     });
 
     // Avoid "stuck" keys when the window loses focus.
     window.addEventListener('blur', () => this.keys.clear());
   }
 
-  // WASD/arrows are screen-relative: W = screen up, D = screen right, etc.
-  keyboardScreenAngle() {
+  keyboardDir() {
     let x = 0;
-    let y = 0;
+    let z = 0;
     for (const code of this.keys) {
-      const d = KEY_SCREEN[code];
+      const d = KEY_DIR[code];
       if (!d) continue;
       x += d[0];
-      y += d[1];
+      z += d[1];
     }
     x = Math.sign(x);
-    y = Math.sign(y);
-    if (!x && !y) return null;
-    return Math.atan2(x, -y);
+    z = Math.sign(z);
+    if (!x && !z) return null;
+    return { x, z };
   }
 
-  stickScreenAngle() {
-    const ax = this.padAxes.x;
-    const ay = this.padAxes.y;
-    if (Math.hypot(ax, ay) < STICK_DEADZONE) return null;
-    return Math.atan2(ax, -ay);
-  }
+  // Persistent stick snapping + deadzone/hysteresis, evaluated every frame.
+  _updateStickHeld() {
+    const ax = Number.isFinite(this.padAxes.x) ? this.padAxes.x : 0;
+    const ay = Number.isFinite(this.padAxes.y) ? this.padAxes.y : 0;
+    const magnitude = Math.hypot(ax, ay);
 
-  getDirection(projectedDirs) {
-    const kb = this.keyboardScreenAngle();
-    const pad = this.stickScreenAngle();
+    if (this.stickHeld) {
+      if (magnitude < STICK_RELEASE_DEADZONE) {
+        this.stickHeld = null;
+        return;
+      }
 
-    let angle = null;
-    if (this.device.startsWith('gamepad')) {
-      angle = pad !== null ? pad : kb;
-    } else {
-      angle = kb !== null ? kb : pad;
+      const angle = Math.atan2(ax, -ay);
+      const delta = signedAngleDifference(angle, this.stickHeld.angle);
+
+      // Keep the held direction until the angle passes more than 12 degrees
+      // beyond its sector boundary, then snap to the sector it is in.
+      if (Math.abs(delta) > this.stickHeld.halfAngle + DIRECTION_HYSTERESIS + 1e-9) {
+        const next = pickGridDir(angle);
+        if (next) {
+          const info = directionInfo(next.x, next.z);
+          if (info) this.stickHeld = info;
+        }
+      }
+      return;
     }
 
-    if (angle === null) return null;
-    return pickGridDir(angle, projectedDirs);
+    if (magnitude >= STICK_DEADZONE) {
+      const angle = Math.atan2(ax, -ay);
+      const next = pickGridDir(angle);
+      if (next) this.stickHeld = directionInfo(next.x, next.z);
+    }
+  }
+
+  // Called once per rendered frame, after pollGamepads and before ticker.update.
+  updateMovement() {
+    this._updateStickHeld();
+
+    const kb = this.keyboardDir();
+    const padDevice = this.device.startsWith('gamepad');
+    let dir = null;
+    let source = null;
+
+    if (padDevice) {
+      if (this.stickHeld) {
+        dir = this.stickHeld;
+        source = 'stick';
+      } else if (kb) {
+        dir = kb;
+        source = 'keyboard';
+      }
+    } else {
+      if (kb) {
+        dir = kb;
+        source = 'keyboard';
+      } else if (this.stickHeld) {
+        dir = this.stickHeld;
+        source = 'stick';
+      }
+    }
+
+    let preferX = true;
+    if (dir && source === 'stick' && dir.x !== 0 && dir.z !== 0) {
+      preferX = Math.abs(this.padAxes.x) >= Math.abs(this.padAxes.y);
+    }
+
+    this.heldDir = dir ? { x: dir.x, z: dir.z } : null;
+    this.currentIntent = dir
+      ? {
+          dir: { x: dir.x, z: dir.z },
+          preferX,
+          source,
+        }
+      : null;
+  }
+
+  getDirection() {
+    return this.heldDir ? { x: this.heldDir.x, z: this.heldDir.z } : null;
+  }
+
+  getMoveIntent() {
+    return this.currentIntent;
   }
 
   consumeActions() {
@@ -281,13 +270,23 @@ export class Input {
   }
 
   pollGamepads() {
-    if (!navigator.getGamepads) return;
-    const pads = navigator.getGamepads();
-    const seen = new Set();
+    if (typeof navigator === 'undefined' || !navigator.getGamepads) {
+      this.padAxes = { x: 0, y: 0 };
+      this._padStickActive = false;
+      this._activePadId = null;
+      return;
+    }
 
-    let sawActiveStick = false;
-    let activePadId = null;
-    let activeAxes = null;
+    const pads = navigator.getGamepads();
+    if (!pads) {
+      this.padAxes = { x: 0, y: 0 };
+      this._padStickActive = false;
+      this._activePadId = null;
+      return;
+    }
+
+    const seen = new Set();
+    const candidates = [];
 
     for (let i = 0; i < pads.length; i++) {
       const gp = pads[i];
@@ -300,21 +299,10 @@ export class Input {
 
       if (!this.connectedIds.has(gp.id)) {
         this.connectedIds.add(gp.id);
-        // Exactly once per id, including pads first discovered by polling.
         if (!this.notifiedIds.has(gp.id)) {
           this.notifiedIds.add(gp.id);
           this.onToast(`🎮 Controller connected: ${gp.id}`);
         }
-      }
-
-      const axes = gp.axes || [];
-      const ax = axes.length > 0 ? (axes[0] || 0) : 0;
-      const ay = axes.length > 1 ? (axes[1] || 0) : 0;
-
-      if (!sawActiveStick && Math.hypot(ax, ay) >= STICK_DEADZONE) {
-        sawActiveStick = true;
-        activePadId = gp.id;
-        activeAxes = { x: ax, y: ay };
       }
 
       const buttons = gp.buttons || [];
@@ -324,7 +312,7 @@ export class Input {
         this.padButtonState.set(i, prev);
       }
 
-      // Face buttons and D-pad. D-pad is action-only; it never moves the player.
+      // Face buttons and D-pad. D-pad queues swaps only; it never moves.
       for (const key of Object.keys(PAD_ACTION)) {
         const idx = Number(key);
         const btn = buttons[idx];
@@ -343,24 +331,63 @@ export class Input {
         this.onPause();
       }
       prev[PAD_PAUSE_BUTTON] = pausePressed;
+
+      const axes = gp.axes || [];
+      const ax = axes.length > 0 ? (axes[0] || 0) : 0;
+      const ay = axes.length > 1 ? (axes[1] || 0) : 0;
+      candidates.push({
+        id: gp.id,
+        ax,
+        ay,
+        magnitude: Math.hypot(ax, ay),
+      });
     }
 
-    if (sawActiveStick) {
-      // Only switch the device on stick activation (or pad change), so simply
-      // holding a stick does not steal the hint back after keyboard use.
-      if (!this._padStickActive || this._activePadId !== activePadId) {
-        this.device = `gamepad: ${activePadId}`;
+    const previousAx = this.padAxes.x;
+    const previousAy = this.padAxes.y;
+    const activeThreshold = this.stickHeld
+      ? STICK_RELEASE_DEADZONE
+      : STICK_DEADZONE;
+
+    let chosen = null;
+    if (this._activePadId !== null) {
+      const active = candidates.find((c) => c.id === this._activePadId);
+      if (active && active.magnitude >= activeThreshold) chosen = active;
+    }
+
+    if (!chosen) {
+      let best = null;
+      for (const c of candidates) {
+        if (c.magnitude < STICK_DEADZONE) continue;
+        if (!best || c.magnitude > best.magnitude) best = c;
       }
-      this._padStickActive = true;
-      this._activePadId = activePadId;
-      this.padAxes = activeAxes;
+      chosen = best;
+    }
+
+    if (chosen) {
+      this.padAxes = { x: chosen.ax, y: chosen.ay };
+
+      const changedPad = this._activePadId !== chosen.id;
+      this._activePadId = chosen.id;
+
+      const threshold = this.stickHeld
+        ? STICK_RELEASE_DEADZONE
+        : STICK_DEADZONE;
+      const active = chosen.magnitude >= threshold;
+      const delta = Math.hypot(chosen.ax - previousAx, chosen.ay - previousAy);
+
+      // Only actual new stick activity steals the input device. Holding a
+      // steady stick does not override a more recent keyboard press.
+      if (active && (!this._padStickActive || changedPad || delta > STICK_ACTIVITY_DELTA)) {
+        this.device = `gamepad: ${chosen.id}`;
+      }
+      this._padStickActive = active;
     } else {
+      this.padAxes = { x: 0, y: 0 };
       this._padStickActive = false;
       this._activePadId = null;
-      this.padAxes = { x: 0, y: 0 };
     }
 
-    // Disconnects (detected by id so index shuffles don't false-positive).
     for (const id of Array.from(this.connectedIds)) {
       if (!seen.has(id)) {
         this.connectedIds.delete(id);
