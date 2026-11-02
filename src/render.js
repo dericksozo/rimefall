@@ -3,9 +3,19 @@
 
 import * as THREE from 'three';
 import { createEntityMesh } from './entities.js';
-import { ROOM_SIZE, MIN, MAX, pillars, brokenWall } from './world.js';
+import { ROOM_SIZE, MIN, MAX, pillars, brokenWall, SPAWN } from './world.js';
 
 const CENTER = (MIN + MAX) / 2;
+
+// Eight grid directions, clockwise from north/up.
+const GRID_DIRS = [
+  [0, -1], [1, -1], [1, 0], [1, 1],
+  [0, 1], [-1, 1], [-1, 0], [-1, -1],
+];
+
+const PREGLIDE_MAX_FRACTION = 0.35; // at most 35% of a tile before the tick
+const PREGLIDE_SPEED = 0.8;         // fraction per full tick, before the cap
+const RETURN_MS = 140;
 
 // Snow volume around the play area. Flakes that drift within SNOW_SAFE_RADIUS
 // of the camera are recycled, so none ever balloon in the foreground.
@@ -55,14 +65,16 @@ export class Render {
     // Pulled back ~10% from milestone 1 with a slightly tighter FOV.
     this.camera = new THREE.PerspectiveCamera(44, window.innerWidth / window.innerHeight, 0.1, 200);
     this.camOffset = new THREE.Vector3(7.26, 11.44, 7.26);
-    this.follow = new THREE.Vector3(CENTER, 0, CENTER);
+    this.follow = new THREE.Vector3(SPAWN.x, 0, SPAWN.z);
     this.camPos = this.follow.clone().add(this.camOffset);
-    this.camLook = new THREE.Vector3(CENTER, 0.9, CENTER);
+    this.camLook = new THREE.Vector3(SPAWN.x, 0.9, SPAWN.z);
     this.camera.position.copy(this.camPos);
     this.camera.lookAt(this.camLook);
 
     this._tmpA = new THREE.Vector3();
     this._tmpB = new THREE.Vector3();
+    this._tmpProj = new THREE.Vector3();
+    this._tmpScreen = new THREE.Vector3();
 
     this._buildLights();
     this._buildFloor();
@@ -71,6 +83,19 @@ export class Render {
     this._buildPlayer();
     this._buildTileMarker();
     this._buildSnow();
+
+    // Visual movement state. Logical moves stay on tick boundaries; these
+    // glides only control where the rendered mesh is.
+    this.visX = SPAWN.x;
+    this.visZ = SPAWN.z;
+    this.moveMode = 'idle'; // 'idle' | 'pre' | 'return' | 'move'
+    this.glide = null;
+    this.facingYaw = 0; // model front is +z; spawn faces south
+
+    // Glide times use a pause-aware game clock.
+    this.paused = false;
+    this._pauseStartedAt = 0;
+    this.clockOffset = 0;
 
     this._onResize = () => this.resize();
     window.addEventListener('resize', this._onResize);
@@ -193,7 +218,8 @@ export class Render {
   _buildPlayer() {
     this.playerMesh = createEntityMesh('player');
     this.playerMesh.scale.setScalar(1.25); // reads more clearly at this camera distance
-    this.playerMesh.position.set(CENTER, 0, CENTER);
+    this.playerMesh.position.set(SPAWN.x, 0, SPAWN.z);
+    this.playerMesh.rotation.y = 0;
     this.scene.add(this.playerMesh);
   }
 
@@ -216,7 +242,7 @@ export class Render {
       toneMapped: false,
     });
     this.tileMarker = new THREE.LineLoop(geo, mat);
-    this.tileMarker.position.set(CENTER, 0.035, CENTER);
+    this.tileMarker.position.set(SPAWN.x, 0.035, SPAWN.z);
     this.scene.add(this.tileMarker);
   }
 
@@ -316,27 +342,232 @@ export class Render {
     out.z = CENTER - 3;
   }
 
+  // ---- screen-space projection helpers ----
+
+  _projectToScreen(v) {
+    const el = this.renderer.domElement;
+    const w = el.clientWidth || window.innerWidth;
+    const h = el.clientHeight || window.innerHeight;
+    this.camera.updateMatrixWorld();
+    this._tmpScreen.copy(v).project(this.camera);
+    return {
+      x: (this._tmpScreen.x * 0.5 + 0.5) * w,
+      y: (-this._tmpScreen.y * 0.5 + 0.5) * h,
+    };
+  }
+
+  tileToScreen(x, z) {
+    this._tmpProj.set(x, 0, z);
+    return this._projectToScreen(this._tmpProj);
+  }
+
+  meshScreen() {
+    return this._projectToScreen(this.playerMesh.position);
+  }
+
+  meshWorld() {
+    return {
+      x: this.playerMesh.position.x,
+      z: this.playerMesh.position.z,
+    };
+  }
+
+  // Screen angle of every grid step from the given tile, measured from screen
+  // up (0) clockwise, with CSS screen y pointing down.
+  projectedDirs(tileX, tileZ) {
+    const base = this.tileToScreen(tileX, tileZ);
+    const out = [];
+    for (const [dx, dz] of GRID_DIRS) {
+      const p = this.tileToScreen(tileX + dx, tileZ + dz);
+      const sx = p.x - base.x;
+      const sy = p.y - base.y;
+      out.push({ x: dx, z: dz, angle: Math.atan2(sx, -sy) });
+    }
+    return out;
+  }
+
+  // ---- pause-aware visual movement clock ----
+
+  setPaused(paused, nowMs = performance.now()) {
+    const now = nowMs / 1000;
+    if (paused) {
+      if (!this.paused) {
+        this.paused = true;
+        this._pauseStartedAt = now;
+      }
+    } else if (this.paused) {
+      this.paused = false;
+      this.clockOffset += now - this._pauseStartedAt;
+    }
+  }
+
+  _gameTime(nowMs) {
+    return nowMs / 1000 - this.clockOffset;
+  }
+
+  _faceTowards(dx, dz) {
+    if (dx * dx + dz * dz < 1e-8) return;
+    this.facingYaw = Math.atan2(dx, dz);
+  }
+
+  _visualAt(timeSec) {
+    const g = this.glide;
+    if (!g) return { x: this.visX, z: this.visZ };
+
+    const span = Math.max(1e-6, g.end - g.start);
+    let t = (timeSec - g.start) / span;
+    if (t < 0) t = 0;
+    else if (t > 1) t = 1;
+
+    let f;
+    if (this.moveMode === 'pre') {
+      f = t * g.fraction;
+    } else if (this.moveMode === 'return') {
+      f = t * t * (3 - 2 * t); // ease back
+    } else {
+      f = t; // committed move: constant speed, tile-to-tile
+    }
+
+    return {
+      x: g.fromX + (g.toX - g.fromX) * f,
+      z: g.fromZ + (g.toZ - g.fromZ) * f,
+    };
+  }
+
+  isCommittedMoving() {
+    return this.moveMode === 'move';
+  }
+
+  /**
+   * Start the visual glide for a logical move that committed at boundaryMs.
+   * If a pre-glide is active, continue from its ideal position at the tick
+   * boundary; otherwise start exactly on the previous logical tile so held
+   * movement remains constant-speed and hitch-free across ticks.
+   */
+  requestMove(toX, toZ, boundaryMs, tickMs, prevX = this.visX, prevZ = this.visZ) {
+    const boundary = this._gameTime(boundaryMs);
+    const from =
+      this.moveMode === 'pre' || this.moveMode === 'return'
+        ? this._visualAt(boundary)
+        : { x: prevX, z: prevZ };
+
+    this.moveMode = 'move';
+    this.glide = {
+      fromX: from.x,
+      fromZ: from.z,
+      toX,
+      toZ,
+      start: boundary,
+      end: boundary + tickMs / 1000,
+      fraction: 1,
+    };
+    this._faceTowards(toX - from.x, toZ - from.z);
+  }
+
+  preGlideTo(toX, toZ, nowMs, remainingMs, tickMs) {
+    if (this.moveMode === 'move') return;
+
+    if (
+      this.moveMode === 'pre' &&
+      this.glide &&
+      this.glide.toX === toX &&
+      this.glide.toZ === toZ
+    ) {
+      return;
+    }
+
+    const remaining = Math.max(0, remainingMs);
+    if (remaining <= 0) return;
+
+    const frac = Math.min(
+      PREGLIDE_MAX_FRACTION,
+      PREGLIDE_SPEED * (remaining / tickMs)
+    );
+    if (frac <= 0.0001) return;
+
+    const now = this._gameTime(nowMs);
+    this.moveMode = 'pre';
+    this.glide = {
+      fromX: this.visX,
+      fromZ: this.visZ,
+      toX,
+      toZ,
+      start: now,
+      end: now + remaining / 1000,
+      fraction: frac,
+    };
+    this._faceTowards(toX - this.visX, toZ - this.visZ);
+  }
+
+  returnToTile(x, z, nowMs) {
+    if (this.moveMode === 'move') return;
+
+    if (
+      this.moveMode === 'return' &&
+      this.glide &&
+      this.glide.toX === x &&
+      this.glide.toZ === z
+    ) {
+      return;
+    }
+
+    const dx = this.visX - x;
+    const dz = this.visZ - z;
+    if (dx * dx + dz * dz < 1e-8) {
+      this.moveMode = 'idle';
+      this.glide = null;
+      return;
+    }
+
+    const now = this._gameTime(nowMs);
+    this.moveMode = 'return';
+    this.glide = {
+      fromX: this.visX,
+      fromZ: this.visZ,
+      toX: x,
+      toZ: z,
+      start: now,
+      end: now + RETURN_MS / 1000,
+      fraction: 1,
+    };
+    // Keep the last gameplay facing while easing back to the tile.
+  }
+
   // player: { x, z, prevX, prevZ, facing: {x,z} }
   // alpha: 0..1 progress through the current tick; moving: did the last tick move?
-  update(dt, player, alpha, moving) {
+  update(dt, player, alpha, moving, nowMs) {
     const clamped = Math.min(dt, 0.1);
+    const now = this._gameTime(typeof nowMs === 'number' ? nowMs : performance.now());
 
-    const ix = player.prevX + (player.x - player.prevX) * alpha;
-    const iz = player.prevZ + (player.z - player.prevZ) * alpha;
-    const bob = moving ? Math.sin(alpha * Math.PI) * 0.11 : 0;
-    this.playerMesh.position.set(ix, bob, iz);
+    if (!this.paused && this.glide) {
+      const g = this.glide;
+      const p = this._visualAt(now);
+      this.visX = p.x;
+      this.visZ = p.z;
 
-    // Smoothly turn toward the facing direction (model front is +z).
-    const targetYaw = Math.atan2(player.facing.x, player.facing.z);
-    let delta = targetYaw - this.playerMesh.rotation.y;
+      const span = Math.max(1e-6, g.end - g.start);
+      const t = (now - g.start) / span;
+      if (t >= 1 && this.moveMode !== 'pre') {
+        this.visX = g.toX;
+        this.visZ = g.toZ;
+        this.moveMode = 'idle';
+        this.glide = null;
+      }
+    }
+
+    // Single straight lerp on x and z together. No per-tile bob reset hitch.
+    this.playerMesh.position.set(this.visX, 0, this.visZ);
+
+    // Turn toward the actual movement vector; when idle keep the last facing.
+    let delta = this.facingYaw - this.playerMesh.rotation.y;
     delta = Math.atan2(Math.sin(delta), Math.cos(delta));
-    this.playerMesh.rotation.y += delta * (1 - Math.exp(-16 * clamped));
+    this.playerMesh.rotation.y += delta * (1 - Math.exp(-18 * clamped));
 
     // True-tile marker snaps to the logical tile; it never interpolates.
     this.tileMarker.position.set(player.x, 0.035, player.z);
 
-    // Camera glides toward the interpolated player position.
-    this.follow.lerp(this._tmpA.set(ix, 0, iz), 1 - Math.exp(-14 * clamped));
+    // Camera glides toward the rendered player position.
+    this.follow.lerp(this._tmpA.set(this.visX, 0, this.visZ), 1 - Math.exp(-14 * clamped));
     this._tmpB.copy(this.follow).add(this.camOffset);
     this.camPos.lerp(this._tmpB, 1 - Math.exp(-6 * clamped));
     this.camera.position.copy(this.camPos);

@@ -1,4 +1,4 @@
-// Rimefall milestone 1: grid, fixed ticks, movement, input, placeholder visuals.
+// Rimefall milestone 1.1: camera-relative movement, pre-glide feel fixes.
 
 import { Input } from './input.js';
 import { Ticker } from './tick.js';
@@ -12,6 +12,8 @@ const hud = {
   toast: document.getElementById('toast'),
   pause: document.getElementById('pause-overlay'),
 };
+const hintEl = document.getElementById('hint');
+const KEYBOARD_HINT_HTML = hintEl.innerHTML;
 
 let toastTimer = 0;
 function showToast(text, ms = 3000) {
@@ -41,7 +43,7 @@ function togglePause() {
 }
 
 // One tile per tick; diagonals need target + both orthogonal neighbours free.
-function tryMove(dx, dz) {
+function canMove(dx, dz) {
   const nx = player.x + dx;
   const nz = player.z + dz;
   if (!isWalkable(nx, nz)) return false;
@@ -49,26 +51,40 @@ function tryMove(dx, dz) {
     if (!isWalkable(player.x + dx, player.z)) return false;
     if (!isWalkable(player.x, player.z + dz)) return false;
   }
-  player.x = nx;
-  player.z = nz;
   return true;
 }
 
+function tryMove(dx, dz) {
+  if (!canMove(dx, dz)) return false;
+  player.x += dx;
+  player.z += dz;
+  return true;
+}
+
+let lastMoveDir = null;
+let movedThisFrame = false;
+
 ticker.subscribe(() => {
-  // Interpolation runs from the tile we were on at the start of this tick.
+  // Interpolation starts from the tile we were on at the start of this tick.
   player.prevX = player.x;
   player.prevZ = player.z;
   player.moved = false;
 
   for (const action of input.consumeActions()) {
     // Combat / gear / food arrive in later milestones.
-    console.log(`[rimefall] action buffered: ${action} (milestone 1 has no combat)`);
+    console.log(`[rimefall] action buffered: ${action} (milestone 1.1 has no combat)`);
   }
 
-  const dir = input.getDirection();
+  // Direction picking happens against the camera at tick time. The stick is
+  // sampled from the latest polled axes; releasing it before this tick = no move.
+  const dirs = render.projectedDirs(player.x, player.z);
+  const dir = input.getDirection(dirs);
+  lastMoveDir = dir ? { x: dir.x, z: dir.z } : null;
+
   if (dir) {
     player.facing = { x: dir.x, z: dir.z }; // last attempted direction
     player.moved = tryMove(dir.x, dir.z);
+    if (player.moved) movedThisFrame = true;
   }
 });
 
@@ -87,7 +103,39 @@ function facingName(f) {
   return FACING_NAMES[`${f.x},${f.z}`] || 'south';
 }
 
-// Test hook for the automated director.
+// ---- live controls hint ----
+
+function isPlayStationId(id) {
+  const s = String(id).toLowerCase();
+  return (
+    s.includes('dualshock') ||
+    s.includes('dualsense') ||
+    s.includes('wireless controller') ||
+    s.includes('054c')
+  );
+}
+
+let hintKey = 'keyboard';
+function updateHint() {
+  const device = input.device;
+
+  if (device.startsWith('gamepad')) {
+    const id = device.slice('gamepad: '.length);
+    const playstation = isPlayStationId(id);
+    const key = playstation ? 'pad-playstation' : 'pad-xbox';
+    if (hintKey !== key) {
+      hintEl.textContent = playstation
+        ? 'Left stick move · ✕ attack · □ eat · D-pad swap gear · Options pause'
+        : 'Left stick move · A attack · X eat · D-pad swap gear · Start pause';
+      hintKey = key;
+    }
+  } else if (hintKey !== 'keyboard') {
+    hintEl.innerHTML = KEYBOARD_HINT_HTML;
+    hintKey = 'keyboard';
+  }
+}
+
+// Test hooks for the automated director.
 window.__rimefall = {
   get tick() {
     return ticker.tick;
@@ -111,6 +159,21 @@ window.__rimefall = {
   },
   isWalkable,
   blockers,
+  tileToScreen(x, z) {
+    return render.tileToScreen(x, z);
+  },
+  meshScreen() {
+    return render.meshScreen();
+  },
+  meshWorld() {
+    return render.meshWorld();
+  },
+  get hintText() {
+    return hintEl.textContent;
+  },
+  get lastMoveDir() {
+    return lastMoveDir ? { x: lastMoveDir.x, z: lastMoveDir.z } : null;
+  },
 };
 
 const hudState = { tick: -1, tile: '', input: '' };
@@ -127,6 +190,30 @@ function updateHud() {
   if (input.device !== hudState.input) {
     hudState.input = input.device;
     hud.input.textContent = input.device;
+    updateHint();
+  }
+}
+
+// Start-of-tick pre-glide: if the player is idle and movement input begins
+// mid-tick, move the mesh a little toward the predicted neighbour immediately.
+function updatePreGlide(now) {
+  if (ticker.paused) return;
+  if (player.moved || render.isCommittedMoving()) return;
+
+  const dirs = render.projectedDirs(player.x, player.z);
+  const dir = input.getDirection(dirs);
+
+  if (dir && canMove(dir.x, dir.z)) {
+    const remainingMs = Math.max(0, ticker.tickMs - ticker.acc);
+    render.preGlideTo(
+      player.x + dir.x,
+      player.z + dir.z,
+      now,
+      remainingMs,
+      ticker.tickMs
+    );
+  } else {
+    render.returnToTile(player.x, player.z, now);
   }
 }
 
@@ -141,8 +228,27 @@ function frame(now) {
   last = now;
 
   input.pollGamepads();
+  render.setPaused(ticker.paused, now);
+
+  movedThisFrame = false;
   ticker.update(now);
-  render.update(dt, player, ticker.alpha, player.moved);
+
+  if (movedThisFrame) {
+    const boundaryMs = now - ticker.acc;
+    render.requestMove(
+      player.x,
+      player.z,
+      boundaryMs,
+      ticker.tickMs,
+      player.prevX,
+      player.prevZ
+    );
+  }
+
+  render.update(dt, player, ticker.alpha, player.moved, now);
+
+  if (!ticker.paused) updatePreGlide(now);
+
   render.render();
   updateHud();
 
@@ -152,4 +258,5 @@ function frame(now) {
   }
 }
 
+updateHint();
 requestAnimationFrame(frame);
