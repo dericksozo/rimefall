@@ -1,5 +1,5 @@
-// Three.js presentation layer: room, props, player, camera, lights, snow.
-// It knows nothing about game rules; main.js feeds it player state + tick alpha.
+// Three.js presentation layer: room, props, player, enemies, camera, lights, snow.
+// It knows nothing about game rules; main.js feeds it state + tick alpha.
 
 import * as THREE from 'three';
 import { createEntityMesh } from './entities.js';
@@ -22,6 +22,9 @@ const SNOW_WIDTH_Z = SNOW_BOUNDS.maxZ - SNOW_BOUNDS.minZ;
 const SNOW_HEIGHT = SNOW_BOUNDS.maxY - SNOW_BOUNDS.minY;
 const SNOW_SAFE_RADIUS = 4.6;
 const SNOW_SAFE_RADIUS_SQ = SNOW_SAFE_RADIUS * SNOW_SAFE_RADIUS;
+
+const PLAYER_SWING_TIME = 0.36;
+const WOLF_SCALE = 1.12;
 
 function mulberry32(seed) {
   return function random() {
@@ -66,12 +69,18 @@ export class Render {
     this._tmpProj = new THREE.Vector3();
     this._tmpScreen = new THREE.Vector3();
 
+    this.enemyMeshes = new Map();
+    this.animTime = 0;
+    this.swing = 0;
+
     this._buildLights();
     this._buildFloor();
     this._buildWalls();
     this._buildProps();
     this._buildPlayer();
     this._buildTileMarker();
+    this._buildTargetRing();
+    this._buildTargetArrow();
     this._buildSnow();
 
     this.facingYaw = 0; // model front is +z; spawn faces south
@@ -225,6 +234,69 @@ export class Render {
     this.scene.add(this.tileMarker);
   }
 
+  _buildTargetRing() {
+    // Red tile outline under the current target; follows the interpolated wolf.
+    const geo = new THREE.RingGeometry(0.36, 0.5, 4, 1);
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0xff3b30,
+      transparent: true,
+      opacity: 0.85,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    this.targetRing = new THREE.Mesh(geo, mat);
+    this.targetRing.rotation.x = -Math.PI / 2;
+    this.targetRing.rotation.z = Math.PI / 4;
+    this.targetRing.position.set(SPAWN.x, 0.05, SPAWN.z);
+    this.targetRing.visible = false;
+    this.scene.add(this.targetRing);
+  }
+
+  _buildTargetArrow() {
+    // Screen-facing red chevron above the current target. depthTest:false and
+    // a high renderOrder keep it visible even when the player model hides the
+    // wolf itself (the common case when the wolf is directly north).
+    const size = 128;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, size, size);
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+
+    const drawChevron = (width, color) => {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width;
+      ctx.beginPath();
+      ctx.moveTo(22, 28);
+      ctx.lineTo(64, 84);
+      ctx.lineTo(106, 28);
+      ctx.stroke();
+    };
+
+    drawChevron(20, 'rgba(0, 0, 0, 0.9)');
+    drawChevron(12, '#ff3b30');
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.needsUpdate = true;
+
+    const mat = new THREE.SpriteMaterial({
+      map: tex,
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    this.targetArrow = new THREE.Sprite(mat);
+    this.targetArrow.scale.set(0.78, 0.78, 1);
+    this.targetArrow.renderOrder = 999;
+    this.targetArrow.visible = false;
+    this.scene.add(this.targetArrow);
+  }
+
   _createSnowTexture() {
     // Soft round flake: white core fading to transparent, no external files.
     const size = 64;
@@ -351,11 +423,67 @@ export class Render {
     };
   }
 
+  // Project a live, interpolated entity anchor for DOM overlays.
+  // ref = { kind: 'player' } or { kind: 'enemy', id }
+  entityScreen(ref, yOffset = 1.2) {
+    let mesh = null;
+    if (ref && ref.kind === 'player') mesh = this.playerMesh;
+    else if (ref && ref.kind === 'enemy') {
+      const rec = this.enemyMeshes.get(ref.id);
+      mesh = rec ? rec.mesh : null;
+    }
+    if (!mesh) return null;
+    this._tmpProj.set(mesh.position.x, yOffset, mesh.position.z);
+    const scr = this._projectToScreen(this._tmpProj);
+    if (this._tmpScreen.z > 1 || this._tmpScreen.z < -1) return null;
+    return scr;
+  }
+
+  triggerPlayerAttack() {
+    this.swing = PLAYER_SWING_TIME;
+  }
+
+  _syncEnemies(list) {
+    const seen = new Set();
+    for (const e of list) {
+      seen.add(e.id);
+      let rec = this.enemyMeshes.get(e.id);
+      if (!rec) {
+        const mesh = createEntityMesh(e.kind);
+        mesh.scale.setScalar(WOLF_SCALE);
+        mesh.position.set(e.x, 0, e.z);
+        this.scene.add(mesh);
+        const mats = [];
+        mesh.traverse((o) => {
+          if (o.isMesh && o.material) mats.push(o.material);
+        });
+        rec = { mesh, mats, baseScale: WOLF_SCALE, crouch: 1 };
+        this.enemyMeshes.set(e.id, rec);
+      }
+      rec.enemy = e;
+    }
+
+    for (const [id, rec] of Array.from(this.enemyMeshes.entries())) {
+      if (seen.has(id)) continue;
+      this.scene.remove(rec.mesh);
+      rec.mesh.traverse((o) => {
+        if (o.isMesh) {
+          if (o.geometry) o.geometry.dispose();
+          if (o.material) o.material.dispose();
+        }
+      });
+      this.enemyMeshes.delete(id);
+    }
+  }
+
   // player: { x, z, prevX, prevZ, facing: {x,z} }
   // alpha: 0..1 progress through the current tick, straight from the ticker.
-  update(dt, player, alpha) {
+  // world: { enemies, targetId, tick } (optional combat presentation state)
+  update(dt, player, alpha, world = null) {
     const clamped = Number.isFinite(dt) ? Math.max(0, Math.min(dt, 0.1)) : 0;
     const t = Math.min(1, Math.max(0, alpha));
+
+    this.animTime += clamped;
 
     // The player mesh is exactly the linear interpolation of the previous and
     // current logical tiles. No pre-glide, easing, return glide or catch-up.
@@ -369,8 +497,103 @@ export class Render {
     delta = Math.atan2(Math.sin(delta), Math.cos(delta));
     this.playerMesh.rotation.y += delta * (1 - Math.exp(-18 * clamped));
 
+    // Short procedural lunge on a child group; never touches the logical tile.
+    const body = this.playerMesh.userData.body;
+    if (body) {
+      if (this.swing > 0) {
+        this.swing = Math.max(0, this.swing - clamped);
+        const p = 1 - this.swing / PLAYER_SWING_TIME;
+        const arc = Math.sin(Math.min(1, Math.max(0, p)) * Math.PI);
+        body.position.z = arc * 0.3;
+        body.position.y = arc * 0.04;
+        body.rotation.x = -arc * 0.14;
+        body.rotation.y = Math.sin(p * Math.PI * 2) * 0.2 * (1 - p);
+      } else {
+        body.position.z = 0;
+        body.position.y = 0;
+        body.rotation.x = 0;
+        body.rotation.y = 0;
+      }
+    }
+
     // True-tile marker snaps to the logical tile; it never interpolates.
     this.tileMarker.position.set(player.x, 0.035, player.z);
+
+    // ---- enemies ----
+    const list = world && world.enemies ? world.enemies : [];
+    this._syncEnemies(list);
+    const tick = world && Number.isFinite(world.tick) ? world.tick : 0;
+
+    for (const rec of this.enemyMeshes.values()) {
+      const e = rec.enemy;
+      if (!e) continue;
+      const mesh = rec.mesh;
+
+      const ex = e.prevX + (e.x - e.prevX) * t;
+      const ez = e.prevZ + (e.z - e.prevZ) * t;
+      mesh.position.set(ex, 0, ez);
+
+      const yaw = Math.atan2(e.facing.x, e.facing.z);
+      let ed = yaw - mesh.rotation.y;
+      ed = Math.atan2(Math.sin(ed), Math.cos(ed));
+      mesh.rotation.y += ed * (1 - Math.exp(-16 * clamped));
+
+      const tele = !!e.telegraph && e.alive;
+      const crouchTarget = tele ? 0.78 : 1;
+      if (clamped > 0) {
+        rec.crouch += (crouchTarget - rec.crouch) * (1 - Math.exp(-22 * clamped));
+      } else {
+        rec.crouch = crouchTarget;
+      }
+
+      let fade = 0;
+      if (!e.alive && e.deathTick != null) {
+        fade = Math.min(1, Math.max(0, tick - e.deathTick + t));
+      }
+
+      const s = rec.baseScale * (1 - 0.55 * fade);
+      mesh.scale.set(s, s * rec.crouch * (1 - 0.25 * fade), s);
+      mesh.visible = fade < 1;
+
+      for (const m of rec.mats) {
+        if (fade > 0) {
+          m.transparent = true;
+          m.opacity = 1 - fade;
+        } else if (m.opacity !== 1) {
+          m.opacity = 1;
+          m.transparent = false;
+        }
+        if (m.emissive) {
+          if (tele) {
+            m.emissive.setHex(0x3fa9ff);
+            m.emissiveIntensity = 0.55 + 0.45 * Math.sin(this.animTime * 16);
+          } else {
+            m.emissiveIntensity = 0;
+          }
+        }
+      }
+    }
+
+    // ---- target marker ----
+    const targetId = world ? world.targetId : null;
+    const targetRec = targetId != null ? this.enemyMeshes.get(targetId) : null;
+    if (targetRec && targetRec.enemy && targetRec.enemy.alive) {
+      this.targetRing.visible = true;
+      this.targetRing.position.set(targetRec.mesh.position.x, 0.05, targetRec.mesh.position.z);
+      const pulse = 1 + Math.sin(this.animTime * 5) * 0.06;
+      this.targetRing.scale.setScalar(pulse);
+
+      this.targetArrow.visible = true;
+      const bob = Math.sin(this.animTime * 3.8) * 0.09;
+      this.targetArrow.position.set(
+        targetRec.mesh.position.x,
+        2.35 + bob,
+        targetRec.mesh.position.z
+      );
+    } else {
+      this.targetRing.visible = false;
+      this.targetArrow.visible = false;
+    }
 
     // Camera glides toward the rendered player position.
     this.follow.lerp(this._tmpA.set(x, 0, z), 1 - Math.exp(-14 * clamped));

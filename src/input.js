@@ -12,12 +12,21 @@ const KEY_DIR = {
 const KEY_ACTION = {
   Space: 'attack',
   KeyE: 'eat',
+  KeyQ: 'clear',
   Digit1: 'swap1', Digit2: 'swap2', Digit3: 'swap3',
   Numpad1: 'swap1', Numpad2: 'swap2', Numpad3: 'swap3',
 };
 
 // Standard mapping buttons. D-pad is action-only; it never moves the player.
-const PAD_ACTION = { 0: 'attack', 2: 'eat', 14: 'swap1', 12: 'swap2', 15: 'swap3' };
+// 0 ✕/A attack · 1 ○/B clear · 2 □/X eat · 5 R1/RB cycle · 4 L1/LB cycle back
+const PAD_ACTION = {
+  0: 'attack',
+  1: 'clear',
+  2: 'eat',
+  4: 'cycleBack',
+  5: 'cycle',
+  14: 'swap1', 12: 'swap2', 15: 'swap3',
+};
 const PAD_PAUSE_BUTTON = 9;
 
 export const STICK_DEADZONE = 0.35;
@@ -135,6 +144,15 @@ export class Input {
         if (!e.repeat) {
           this.device = 'keyboard';
           this.onPause();
+        }
+        return;
+      }
+
+      if (e.code === 'Tab') {
+        e.preventDefault();
+        if (!e.repeat) {
+          this.device = 'keyboard';
+          this.actions.push(e.shiftKey ? 'cycleBack' : 'cycle');
         }
         return;
       }
@@ -267,6 +285,11 @@ export class Input {
     const queued = this.actions;
     this.actions = [];
     return queued;
+  }
+
+  // Used by the automated test hooks: identical to a real button press.
+  queueAction(action) {
+    if (action) this.actions.push(action);
   }
 
   pollGamepads() {
