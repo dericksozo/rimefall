@@ -40,3 +40,12 @@ Plain HTML + ES modules, Three.js from a CDN importmap, no build step. Modules: 
 
 ## Process
 All game code is written by DeepSeek-V4.1-Flash (reasoning_effort=max) via API; the director writes specs, tests in headless Chromium, and sends fix requests. Usage logged in ai-log/usage.jsonl.
+
+## Combat rules (as of Milestone 2.1)
+- **No lock-on.** The player has an 8-way facing; moving sets it. Pushing toward an enemy-occupied tile (or a wall/pillar on a cardinal) turns without moving. A faint wedge marks the facing tile.
+- **Attack** (Space / ✕) is edge-triggered and evaluated on the next tick only. If the weapon is ready, the player swings at the facing tile: an enemy there (cardinal only) gets a hit roll; otherwise it's a whiff. Either way the cooldown is consumed (sword: 4 ticks). A press while on cooldown is discarded (no queueing, no auto-repeat). An attacking tick has no movement.
+- **Eat** (E / □) consumes the tick; nextAttack = max(nextAttack, eatTick + 3). Eat beats attack in the same tick.
+- **NPC movement (OSRS-naive, no pathfinding):** one step per tick toward the player: diagonal (if the target and both corners are free), else the x step, else the z step, else wait. One NPC per tile; NPCs never enter the player's tile. A diagonal-adjacent NPC steps along one axis to reach a cardinal tile. NPCs get stuck behind pillars (safespots) and line up behind each other.
+- **NPC attack cycle:** the telegraph (crouch + glow) is shown on the tick before every attack. On the attack tick the bite rolls only if the player is still cardinally adjacent; otherwise it whiffs. Either way the cooldown is consumed, and the NPC does not move on the following tick. NPCs stand still while the player is in range.
+- **Tick order:** 1) player input (eat > attack > move), 2) NPCs act in spawn order (attack if committed, else telegraph/move), 3) deaths and room state. So stepping off on the attack tick makes the bite whiff (OSRS step-off).
+- **Numbers:** player 40 HP, defence 12; sword acc 18, max hit 6, speed 4. Ice wolf 12 HP, acc 18, def 15, max hit 5, speed 3. Simulated: stand-and-fight ~57% win, step-off player ~100%.

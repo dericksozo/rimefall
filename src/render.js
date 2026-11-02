@@ -24,6 +24,9 @@ const SNOW_SAFE_RADIUS = 4.6;
 const SNOW_SAFE_RADIUS_SQ = SNOW_SAFE_RADIUS * SNOW_SAFE_RADIUS;
 
 const PLAYER_SWING_TIME = 0.36;
+const PLAYER_WHIFF_TIME = 0.2;
+const WHOOSH_FX_TIME = 0.22;
+const ENEMY_BITE_TIME = 0.24;
 const WOLF_SCALE = 1.12;
 
 function mulberry32(seed) {
@@ -72,6 +75,8 @@ export class Render {
     this.enemyMeshes = new Map();
     this.animTime = 0;
     this.swing = 0;
+    this.whiffSwing = 0;
+    this.whooshTime = 0;
 
     this._buildLights();
     this._buildFloor();
@@ -79,8 +84,8 @@ export class Render {
     this._buildProps();
     this._buildPlayer();
     this._buildTileMarker();
-    this._buildTargetRing();
-    this._buildTargetArrow();
+    this._buildFacingIndicator();
+    this._buildWhoosh();
     this._buildSnow();
 
     this.facingYaw = 0; // model front is +z; spawn faces south
@@ -234,67 +239,59 @@ export class Render {
     this.scene.add(this.tileMarker);
   }
 
-  _buildTargetRing() {
-    // Red tile outline under the current target; follows the interpolated wolf.
-    const geo = new THREE.RingGeometry(0.36, 0.5, 4, 1);
+  _buildFacingIndicator() {
+    // Faint pale-yellow wedge on the logical facing tile. Snaps with the tile
+    // and facing, never with the interpolated mesh.
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute(
+      'position',
+      new THREE.Float32BufferAttribute(
+        [
+          0, 0, 0.28,
+          0.2, 0, -0.12,
+          0, 0, -0.02,
+          0, 0, 0.28,
+          0, 0, -0.02,
+          -0.2, 0, -0.12,
+        ],
+        3
+      )
+    );
+    geo.computeVertexNormals();
+
     const mat = new THREE.MeshBasicMaterial({
-      color: 0xff3b30,
+      color: 0xfff1a8,
       transparent: true,
-      opacity: 0.85,
+      opacity: 0.35,
       side: THREE.DoubleSide,
       depthWrite: false,
       toneMapped: false,
     });
-    this.targetRing = new THREE.Mesh(geo, mat);
-    this.targetRing.rotation.x = -Math.PI / 2;
-    this.targetRing.rotation.z = Math.PI / 4;
-    this.targetRing.position.set(SPAWN.x, 0.05, SPAWN.z);
-    this.targetRing.visible = false;
-    this.scene.add(this.targetRing);
+
+    this.facingIndicator = new THREE.Mesh(geo, mat);
+    this.facingIndicator.position.set(SPAWN.x, 0.044, SPAWN.z + 1);
+    this.facingIndicator.renderOrder = 2;
+    this.scene.add(this.facingIndicator);
   }
 
-  _buildTargetArrow() {
-    // Screen-facing red chevron above the current target. depthTest:false and
-    // a high renderOrder keep it visible even when the player model hides the
-    // wolf itself (the common case when the wolf is directly north).
-    const size = 128;
-    const canvas = document.createElement('canvas');
-    canvas.width = size;
-    canvas.height = size;
-    const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, size, size);
-    ctx.lineCap = 'round';
-    ctx.lineJoin = 'round';
-
-    const drawChevron = (width, color) => {
-      ctx.strokeStyle = color;
-      ctx.lineWidth = width;
-      ctx.beginPath();
-      ctx.moveTo(22, 28);
-      ctx.lineTo(64, 84);
-      ctx.lineTo(106, 28);
-      ctx.stroke();
-    };
-
-    drawChevron(20, 'rgba(0, 0, 0, 0.9)');
-    drawChevron(12, '#ff3b30');
-
-    const tex = new THREE.CanvasTexture(canvas);
-    tex.colorSpace = THREE.SRGBColorSpace;
-    tex.needsUpdate = true;
-
-    const mat = new THREE.SpriteMaterial({
-      map: tex,
+  _buildWhoosh() {
+    const geo = new THREE.RingGeometry(0.16, 0.37, 20, 1, 0, Math.PI * 1.35);
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0xffffff,
       transparent: true,
-      depthTest: false,
+      opacity: 0,
+      side: THREE.DoubleSide,
       depthWrite: false,
+      blending: THREE.AdditiveBlending,
       toneMapped: false,
     });
-    this.targetArrow = new THREE.Sprite(mat);
-    this.targetArrow.scale.set(0.78, 0.78, 1);
-    this.targetArrow.renderOrder = 999;
-    this.targetArrow.visible = false;
-    this.scene.add(this.targetArrow);
+
+    this.whoosh = new THREE.Mesh(geo, mat);
+    this.whoosh.rotation.x = -Math.PI / 2;
+    this.whoosh.position.set(SPAWN.x, 0.055, SPAWN.z + 1);
+    this.whoosh.renderOrder = 3;
+    this.whoosh.visible = false;
+    this.scene.add(this.whoosh);
   }
 
   _createSnowTexture() {
@@ -439,8 +436,41 @@ export class Render {
     return scr;
   }
 
-  triggerPlayerAttack() {
-    this.swing = PLAYER_SWING_TIME;
+  triggerPlayerAttack(whiff = false, playerState = null) {
+    if (whiff) {
+      this.swing = 0;
+      this.whiffSwing = PLAYER_WHIFF_TIME;
+
+      const facing =
+        playerState && playerState.facing ? playerState.facing : { x: 0, z: 1 };
+      const px =
+        playerState && Number.isFinite(playerState.x)
+          ? playerState.x
+          : this.playerMesh.position.x;
+      const pz =
+        playerState && Number.isFinite(playerState.z)
+          ? playerState.z
+          : this.playerMesh.position.z;
+
+      this.whoosh.position.set(px + facing.x, 0.055, pz + facing.z);
+      this.whoosh.rotation.z = -Math.atan2(facing.x, facing.z);
+      this.whoosh.scale.setScalar(0.82);
+      this.whoosh.material.opacity = 0.8;
+      this.whoosh.visible = true;
+      this.whooshTime = WHOOSH_FX_TIME;
+    } else {
+      this.whiffSwing = 0;
+      this.swing = PLAYER_SWING_TIME;
+      this.whooshTime = 0;
+      this.whoosh.visible = false;
+    }
+  }
+
+  triggerEnemyAttack(id, whiff = false) {
+    const rec = this.enemyMeshes.get(id);
+    if (!rec) return;
+    rec.attackTimer = ENEMY_BITE_TIME;
+    rec.attackWhiff = !!whiff;
   }
 
   _syncEnemies(list) {
@@ -457,7 +487,14 @@ export class Render {
         mesh.traverse((o) => {
           if (o.isMesh && o.material) mats.push(o.material);
         });
-        rec = { mesh, mats, baseScale: WOLF_SCALE, crouch: 1 };
+        rec = {
+          mesh,
+          mats,
+          baseScale: WOLF_SCALE,
+          crouch: 1,
+          attackTimer: 0,
+          attackWhiff: false,
+        };
         this.enemyMeshes.set(e.id, rec);
       }
       rec.enemy = e;
@@ -478,7 +515,7 @@ export class Render {
 
   // player: { x, z, prevX, prevZ, facing: {x,z} }
   // alpha: 0..1 progress through the current tick, straight from the ticker.
-  // world: { enemies, targetId, tick } (optional combat presentation state)
+  // world: { enemies, tick } (optional combat presentation state)
   update(dt, player, alpha, world = null) {
     const clamped = Number.isFinite(dt) ? Math.max(0, Math.min(dt, 0.1)) : 0;
     const t = Math.min(1, Math.max(0, alpha));
@@ -498,9 +535,18 @@ export class Render {
     this.playerMesh.rotation.y += delta * (1 - Math.exp(-18 * clamped));
 
     // Short procedural lunge on a child group; never touches the logical tile.
+    // Whiffs use a faster, much wider sweep so they read differently from hits.
     const body = this.playerMesh.userData.body;
     if (body) {
-      if (this.swing > 0) {
+      if (this.whiffSwing > 0) {
+        this.whiffSwing = Math.max(0, this.whiffSwing - clamped);
+        const p = 1 - this.whiffSwing / PLAYER_WHIFF_TIME;
+        const arc = Math.sin(Math.min(1, Math.max(0, p)) * Math.PI);
+        body.position.z = arc * 0.1;
+        body.position.y = arc * 0.03;
+        body.rotation.x = -arc * 0.08;
+        body.rotation.y = -arc * 1.15;
+      } else if (this.swing > 0) {
         this.swing = Math.max(0, this.swing - clamped);
         const p = 1 - this.swing / PLAYER_SWING_TIME;
         const arc = Math.sin(Math.min(1, Math.max(0, p)) * Math.PI);
@@ -516,8 +562,29 @@ export class Render {
       }
     }
 
+    // Whiff-only white arc on the facing tile.
+    if (this.whooshTime > 0) {
+      this.whooshTime = Math.max(0, this.whooshTime - clamped);
+      const p = 1 - this.whooshTime / WHOOSH_FX_TIME;
+      this.whoosh.material.opacity = 0.8 * (1 - p);
+      this.whoosh.scale.setScalar(0.82 + 0.55 * p);
+      this.whoosh.visible = this.whooshTime > 0;
+    } else {
+      this.whoosh.visible = false;
+    }
+
     // True-tile marker snaps to the logical tile; it never interpolates.
     this.tileMarker.position.set(player.x, 0.035, player.z);
+
+    // Facing wedge snaps to the logical facing tile.
+    const facing = player.facing || { x: 0, z: 1 };
+    this.facingIndicator.position.set(
+      player.x + facing.x,
+      0.044,
+      player.z + facing.z
+    );
+    this.facingIndicator.rotation.y = Math.atan2(facing.x, facing.z);
+    this.facingIndicator.visible = facing.x !== 0 || facing.z !== 0;
 
     // ---- enemies ----
     const list = world && world.enemies ? world.enemies : [];
@@ -532,6 +599,19 @@ export class Render {
       const ex = e.prevX + (e.x - e.prevX) * t;
       const ez = e.prevZ + (e.z - e.prevZ) * t;
       mesh.position.set(ex, 0, ez);
+
+      // Bite lunge is visual only and is added after interpolation.
+      if (rec.attackTimer > 0) {
+        const p = Math.min(
+          1,
+          Math.max(0, 1 - rec.attackTimer / ENEMY_BITE_TIME)
+        );
+        const lunge =
+          Math.sin(p * Math.PI) * (rec.attackWhiff ? 0.14 : 0.3);
+        mesh.position.x += e.facing.x * lunge;
+        mesh.position.z += e.facing.z * lunge;
+        rec.attackTimer = Math.max(0, rec.attackTimer - clamped);
+      }
 
       const yaw = Math.atan2(e.facing.x, e.facing.z);
       let ed = yaw - mesh.rotation.y;
@@ -572,27 +652,6 @@ export class Render {
           }
         }
       }
-    }
-
-    // ---- target marker ----
-    const targetId = world ? world.targetId : null;
-    const targetRec = targetId != null ? this.enemyMeshes.get(targetId) : null;
-    if (targetRec && targetRec.enemy && targetRec.enemy.alive) {
-      this.targetRing.visible = true;
-      this.targetRing.position.set(targetRec.mesh.position.x, 0.05, targetRec.mesh.position.z);
-      const pulse = 1 + Math.sin(this.animTime * 5) * 0.06;
-      this.targetRing.scale.setScalar(pulse);
-
-      this.targetArrow.visible = true;
-      const bob = Math.sin(this.animTime * 3.8) * 0.09;
-      this.targetArrow.position.set(
-        targetRec.mesh.position.x,
-        2.35 + bob,
-        targetRec.mesh.position.z
-      );
-    } else {
-      this.targetRing.visible = false;
-      this.targetArrow.visible = false;
     }
 
     // Camera glides toward the rendered player position.

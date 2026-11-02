@@ -1,4 +1,5 @@
-// Room flow: countdown, wolf spawns, cleared state, death and restart.
+// Room flow: countdown, wolf spawns, cleared state, death, restart and crafted
+// test scenarios. Combat cadence itself lives in enemies.js.
 
 import { SPAWN, isWalkable } from './world.js';
 
@@ -54,6 +55,69 @@ export class Room {
     log({ tick, type: 'restart', src: 'player', dst: 'room', hit: false, dmg: 0, x: SPAWN.x, z: SPAWN.z });
 
     this.start(tick);
+  }
+
+  // Crafted-scenario reset: no countdown, no spawn logs, exact placements.
+  setup(tick, config = {}) {
+    const { enemies, player, fx } = this.ctx;
+    const cfg = config && typeof config === 'object' ? config : {};
+    const pc = cfg.player && typeof cfg.player === 'object' ? cfg.player : {};
+
+    const px = Number.isFinite(Number(pc.x)) ? Number(pc.x) : SPAWN.x;
+    const pz = Number.isFinite(Number(pc.z)) ? Number(pc.z) : SPAWN.z;
+    let facing = { x: 0, z: 1 };
+    if (
+      pc.facing &&
+      Number.isFinite(Number(pc.facing.x)) &&
+      Number.isFinite(Number(pc.facing.z))
+    ) {
+      facing = { x: Number(pc.facing.x), z: Number(pc.facing.z) };
+    }
+
+    player.x = px;
+    player.z = pz;
+    player.prevX = px;
+    player.prevZ = pz;
+    player.facing = facing;
+    player.moved = false;
+    player.nextAttackTick = 0;
+    player.damageTick = -9999;
+
+    const hpValue = Number(cfg.hp);
+    player.hp = Number.isFinite(hpValue)
+      ? Math.max(0, Math.min(player.maxHp, hpValue))
+      : player.maxHp;
+
+    const foodValue = Number(cfg.food);
+    player.food = Number.isFinite(foodValue)
+      ? Math.max(0, Math.floor(foodValue))
+      : player.maxFood;
+
+    enemies.clear();
+
+    const wolfList = Array.isArray(cfg.wolves) ? cfg.wolves : [];
+    for (const w of wolfList) {
+      const wx = w && Number.isFinite(Number(w.x)) ? Number(w.x) : player.x;
+      const wz = w && Number.isFinite(Number(w.z)) ? Number(w.z) : player.z;
+      const enemy = enemies.spawn('ice_wolf', wx, wz, tick);
+      enemy.nextAttackTick = 0;
+      enemy.waitUntilTick = 0;
+      enemy.telegraph = false;
+      enemy.damageTick = -9999;
+      if (wx !== player.x || wz !== player.z) {
+        enemy.facing = {
+          x: Math.sign(player.x - wx),
+          z: Math.sign(player.z - wz),
+        };
+      }
+    }
+
+    fx.clearTransient();
+
+    this.state = 'fighting';
+    this.countdownLeft = 0;
+    this.startedAtTick = tick;
+    this.spawned = true;
   }
 
   tick(tick) {

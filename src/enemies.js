@@ -1,5 +1,6 @@
-// Enemy definitions, spawning, fixed-order AI and BFS pathing.
-// Wolves alternate bite/move on ticks and telegraph bites one tick ahead.
+// Enemy definitions, spawning and deterministic OSRS-style NPC AI.
+// Wolves use naive one-step pathing (no BFS), act in spawn order, and must
+// telegraph for one full tick before a bite can land.
 
 import { isWalkable } from './world.js';
 import { rollHit, rollDamage, isCardinalAdjacent } from './combat.js';
@@ -12,49 +13,30 @@ export const ENEMY_DEFS = {
     hp: 12,
     attackSpeedTicks: 3,
     range: 1,
-    maxHit: 4,
-    accuracy: 12,
+    maxHit: 5,
+    accuracy: 18,
     defence: 15,
     style: 'melee',
     scale: 1.12,
   },
 };
 
-const CARDINAL_STEPS = [
-  [0, -1],
-  [1, 0],
-  [0, 1],
-  [-1, 0],
-];
-const DIAGONAL_STEPS = [
-  [1, -1],
-  [1, 1],
-  [-1, 1],
-  [-1, -1],
-];
-const ALL_STEPS = [...CARDINAL_STEPS, ...DIAGONAL_STEPS];
-
-function key(x, z) {
-  return `${x},${z}`;
-}
-
 export class Enemies {
   constructor(rng) {
     this.rng = rng;
     this.list = [];
     this.nextUid = 1;
-    this.reserved = new Set();
   }
 
   clear() {
     this.list = [];
     this.nextUid = 1;
-    this.reserved.clear();
   }
 
   spawn(kind, x, z, tick) {
     const def = ENEMY_DEFS[kind];
     if (!def) throw new Error(`Unknown enemy kind: ${kind}`);
+
     const enemy = {
       id: `${kind}-${this.nextUid}`,
       uid: this.nextUid,
@@ -68,6 +50,7 @@ export class Enemies {
       maxHp: def.hp,
       alive: true,
       nextAttackTick: tick + 1,
+      waitUntilTick: 0,
       telegraph: false,
       deathTick: null,
       facing: { x: 0, z: 1 },
@@ -79,6 +62,7 @@ export class Enemies {
       range: def.range,
       style: def.style,
     };
+
     this.nextUid += 1;
     this.list.push(enemy);
     return enemy;
@@ -108,8 +92,8 @@ export class Enemies {
     return false;
   }
 
-  // Called once at the top of every game tick, before any AI.
-  // Stores interpolation origins and removes corpses that finished fading.
+  // Stores interpolation origins at the top of every tick and removes corpses
+  // after their one-tick death fade.
   beginTick(tick) {
     const next = [];
     for (const e of this.list) {
@@ -121,11 +105,9 @@ export class Enemies {
     this.list = next;
   }
 
-  // Fixed order = list order. Bites resolve immediately; movement reservations
-  // stop later wolves from entering the same destination this tick.
   tick(tick, player, ctx) {
-    this.reserved.clear();
-
+    // List order is spawn order. No BFS, no reservations: later wolves see the
+    // current positions of wolves that already moved this tick.
     for (const wolf of this.list) {
       if (!wolf.alive) continue;
       if (!ctx.isPlayerAlive()) break;
@@ -134,74 +116,105 @@ export class Enemies {
       const dz = player.z - wolf.z;
       const adjacent = isCardinalAdjacent(wolf.x, wolf.z, player.x, player.z);
 
-      if (adjacent && wolf.nextAttackTick <= tick) {
-        const hit = rollHit(this.rng, wolf.accuracy, player.defence);
-        const dmg = hit ? rollDamage(this.rng, wolf.maxHit) : 0;
+      // a) A committed telegraph resolves now. Out-of-range = visible whiff.
+      if (wolf.telegraph) {
+        let hit = false;
+        let dmg = 0;
+        const inRange = isCardinalAdjacent(wolf.x, wolf.z, player.x, player.z);
+
+        if (inRange) {
+          hit = rollHit(this.rng, wolf.accuracy, player.defence);
+          dmg = hit ? rollDamage(this.rng, wolf.maxHit) : 0;
+        }
+
         wolf.nextAttackTick = tick + wolf.attackSpeedTicks;
         wolf.telegraph = false;
-        wolf.facing = { x: Math.sign(dx), z: Math.sign(dz) };
-        ctx.onBite(wolf, hit, dmg);
+        wolf.waitUntilTick = tick + 2;
+        if (dx !== 0 || dz !== 0) {
+          wolf.facing = { x: Math.sign(dx), z: Math.sign(dz) };
+        }
+        ctx.onBite(wolf, hit, dmg, !inRange);
         continue;
       }
 
-      if (!adjacent) {
-        const next = this._findStep(wolf, player);
-        if (next) {
-          wolf.facing = { x: Math.sign(next.x - wolf.x), z: Math.sign(next.z - wolf.z) };
-          wolf.x = next.x;
-          wolf.z = next.z;
-          this.reserved.add(key(next.x, next.z));
-        }
-      } else {
+      // b) In melee range: stand still and telegraph if the cooldown is ready
+      // for a bite next tick.
+      if (adjacent) {
         wolf.facing = { x: Math.sign(dx), z: Math.sign(dz) };
+        if (wolf.nextAttackTick <= tick + 1) {
+          wolf.telegraph = true;
+        }
+        continue;
       }
 
-      const nowAdjacent = isCardinalAdjacent(wolf.x, wolf.z, player.x, player.z);
-      wolf.telegraph = nowAdjacent && wolf.nextAttackTick <= tick + 1;
+      // c) Not in range: wait out post-attack recovery, otherwise take exactly
+      // one naive step toward the player.
+      if (tick < wolf.waitUntilTick) continue;
+
+      const next = this._findStep(wolf, player);
+      if (next) {
+        wolf.facing = {
+          x: Math.sign(next.x - wolf.x),
+          z: Math.sign(next.z - wolf.z),
+        };
+        wolf.x = next.x;
+        wolf.z = next.z;
+      }
+
+      if (
+        isCardinalAdjacent(wolf.x, wolf.z, player.x, player.z) &&
+        wolf.nextAttackTick <= tick + 1
+      ) {
+        wolf.telegraph = true;
+      }
     }
   }
 
-  // 8-way BFS to the closest free tile cardinally adjacent to the player.
-  // Diagonals require both orthogonal corner tiles to be enterable (same rule
-  // as the player's step()). Returns the first tile of the path, or null.
-  _findStep(wolf, player) {
-    if (isCardinalAdjacent(wolf.x, wolf.z, player.x, player.z)) return null;
-
-    const blocked = new Set(this.reserved);
-    blocked.add(key(player.x, player.z));
+  _isFree(x, z, wolf, player) {
+    if (!isWalkable(x, z)) return false;
+    if (x === player.x && z === player.z) return false;
     for (const e of this.list) {
-      if (e !== wolf && e.alive) blocked.add(key(e.x, e.z));
+      if (e !== wolf && e.alive && e.x === x && e.z === z) return false;
+    }
+    return true;
+  }
+
+  // One OSRS-style naive step: diagonal, else x, else z, else stay.
+  // Diagonal steps require both orthogonal corner tiles to be clear.
+  _findStep(wolf, player) {
+    const sx = Math.sign(player.x - wolf.x);
+    const sz = Math.sign(player.z - wolf.z);
+
+    // Diagonally adjacent wolves must move to a cardinal-adjacent tile.
+    const diagonalAdjacent =
+      Math.abs(player.x - wolf.x) === 1 && Math.abs(player.z - wolf.z) === 1;
+
+    if (diagonalAdjacent) {
+      if (sx !== 0 && this._isFree(wolf.x + sx, wolf.z, wolf, player)) {
+        return { x: wolf.x + sx, z: wolf.z };
+      }
+      if (sz !== 0 && this._isFree(wolf.x, wolf.z + sz, wolf, player)) {
+        return { x: wolf.x, z: wolf.z + sz };
+      }
+      return null;
     }
 
-    const startX = wolf.x;
-    const startZ = wolf.z;
-    const seen = new Set([key(startX, startZ)]);
-    const queue = [{ x: startX, z: startZ, first: null }];
-    let head = 0;
-
-    while (head < queue.length) {
-      const cur = queue[head];
-      head += 1;
-
-      for (const step of ALL_STEPS) {
-        const nx = cur.x + step[0];
-        const nz = cur.z + step[1];
-        const k = key(nx, nz);
-        if (seen.has(k)) continue;
-        if (!isWalkable(nx, nz) || blocked.has(k)) continue;
-
-        if (step[0] !== 0 && step[1] !== 0) {
-          const sx = cur.x + step[0];
-          const sz = cur.z + step[1];
-          if (!isWalkable(sx, cur.z) || blocked.has(key(sx, cur.z))) continue;
-          if (!isWalkable(cur.x, sz) || blocked.has(key(cur.x, sz))) continue;
-        }
-
-        seen.add(k);
-        const first = cur.first || { x: nx, z: nz };
-        if (isCardinalAdjacent(nx, nz, player.x, player.z)) return first;
-        queue.push({ x: nx, z: nz, first });
+    if (sx !== 0 && sz !== 0) {
+      const nx = wolf.x + sx;
+      const nz = wolf.z + sz;
+      const cornerX = this._isFree(nx, wolf.z, wolf, player);
+      const cornerZ = this._isFree(wolf.x, nz, wolf, player);
+      if (cornerX && cornerZ && this._isFree(nx, nz, wolf, player)) {
+        return { x: nx, z: nz };
       }
+    }
+
+    if (sx !== 0 && this._isFree(wolf.x + sx, wolf.z, wolf, player)) {
+      return { x: wolf.x + sx, z: wolf.z };
+    }
+
+    if (sz !== 0 && this._isFree(wolf.x, wolf.z + sz, wolf, player)) {
+      return { x: wolf.x, z: wolf.z + sz };
     }
 
     return null;
