@@ -2,7 +2,7 @@
 """Fresh page from spawn: latency of first visual movement, continuous held glide speed, straight diagonal line, facing."""
 import json, math, time
 from playwright.sync_api import sync_playwright
-PAD = open('/workspace/rimefall/tools/test_m11.py').read().split('PAD = """')[1].split('"""')[0]
+PAD = open('/workspace/rimefall/tools/test_movement.py').read().split('PAD = """')[1].split('"""')[0]
 R = {}
 with sync_playwright() as p:
     b = p.chromium.launch(args=["--use-gl=angle","--use-angle=swiftshader","--enable-unsafe-swiftshader"])

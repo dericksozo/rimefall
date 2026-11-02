@@ -2,7 +2,7 @@
 """Per-rAF sampling of mesh position during held movement to detect hitches between tiles."""
 import json, math, time
 from playwright.sync_api import sync_playwright
-PAD = open('/workspace/rimefall/tools/test_m11.py').read().split('PAD = """')[1].split('"""')[0]
+PAD = open('/workspace/rimefall/tools/test_movement.py').read().split('PAD = """')[1].split('"""')[0]
 with sync_playwright() as p:
     b = p.chromium.launch(args=["--use-gl=angle","--use-angle=swiftshader","--enable-unsafe-swiftshader"])
     pg = b.new_page(viewport={"width":800,"height":450}); pg.add_init_script(PAD)
